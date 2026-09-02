@@ -1,0 +1,46 @@
+README.md
+  h_c5be3b3dad7ca8 1-13
+copier.yml
+  h_c5be3b3dad7ca8 1-34
+template/.github/workflows/homebrew-ci.yml.jinja
+  h_c5be3b3dad7ca8 1-65
+template/.github/workflows/macos-ci.yml.jinja
+  h_c5be3b3dad7ca8 1-18
+template/.github/workflows/release-please.yml.jinja
+  h_c5be3b3dad7ca8 1-18
+template/.gitignore.jinja
+  h_c5be3b3dad7ca8 1-12
+template/.release-please-manifest.json.jinja
+  h_c5be3b3dad7ca8 1-3
+template/AGENTS.md.jinja
+  h_c5be3b3dad7ca8 1-11
+template/CHANGELOG.md.jinja
+  h_c5be3b3dad7ca8 1-7
+template/CONTRIBUTING.md.jinja
+  h_c5be3b3dad7ca8 1-8
+template/Casks/.gitkeep.jinja
+  h_c5be3b3dad7ca8 1-3
+template/Formula/.gitkeep.jinja
+  h_c5be3b3dad7ca8 1-3
+template/README.md.jinja
+  h_c5be3b3dad7ca8 1-19
+template/VERSION.jinja
+  h_c5be3b3dad7ca8 1
+template/release-please-config.json.jinja
+  h_c5be3b3dad7ca8 1-10
+template/scripts/ci-macos.sh.jinja
+  h_c5be3b3dad7ca8 1-14
+tests/test_render_contract.py
+  h_c5be3b3dad7ca8 1-100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "48801d748f651f9b9e085d991798bb5ab8335f97",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
