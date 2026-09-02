@@ -17,7 +17,7 @@ COPIER = shutil.which("copier")
 SHA = re.compile(r"@[0-9a-f]{40}(?:\s+#\s*[^\n]+)?$")
 SECRET = re.compile(r"(?:ghp_|github_pat_|AKIA|-----BEGIN|https://[^/@\s]+@)", re.I)
 COMMON = {
-    ".copier-answers.yml", "README.md", "CONTRIBUTING.md", "AGENTS.md", ".gitignore", "VERSION", "CHANGELOG.md",
+    "README.md", "CONTRIBUTING.md", "AGENTS.md", ".gitignore", "VERSION", "CHANGELOG.md",
     "release-please-config.json", ".release-please-manifest.json", ".github/workflows/release-please.yml",
 }
 
@@ -34,11 +34,6 @@ class RenderContractTests(unittest.TestCase):
             "--data", "template_revision=v0.1.0", str(ROOT), str(target),
         ]
         subprocess.run(command, check=True, capture_output=True, text=True)
-        answers = target / ".copier-answers.yml"
-        answers.write_text(yaml.safe_dump({
-            "_src_path": str(ROOT),
-            "template_revision": "v0.1.0",
-        }, sort_keys=True))
         self.addCleanup(shutil.rmtree, target.parent)
         return target
 
@@ -47,9 +42,7 @@ class RenderContractTests(unittest.TestCase):
 
     def assert_common(self, target: Path, files: set[str]) -> None:
         self.assertTrue(COMMON <= files)
-        answers = yaml.safe_load((target / ".copier-answers.yml").read_text())
-        self.assertEqual(answers["_src_path"], str(ROOT))
-        self.assertEqual(answers["template_revision"], "v0.1.0")
+        self.assertIn("v0.1.0", (target / "README.md").read_text())
         rendered_paths = "\n".join(
             path.relative_to(target).as_posix() for path in target.rglob("*") if path.is_file()
         )
@@ -62,7 +55,7 @@ class RenderContractTests(unittest.TestCase):
                     self.assertRegex(line.strip(), SHA)
         rendered = "\n".join(
             path.read_text(errors="ignore") for path in target.rglob("*")
-            if path.is_file() and path.name != ".copier-answers.yml"
+            if path.is_file()
         )
         self.assertNotRegex(rendered, SECRET)
         self.assertFalse((target / ".beads").exists())
