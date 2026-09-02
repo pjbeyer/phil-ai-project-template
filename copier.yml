@@ -1,4 +1,5 @@
 _templates_suffix: .jinja
+_answers_file: .copier-answers.yml
 
 repository_owner:
   type: str
@@ -22,7 +23,10 @@ template_revision:
   help: Immutable tag or commit selected by the provisioner.
 
 _exclude:
+  - "tests"
   - "tests/**"
+  - "copier.yml"
+  - ".git"
   - ".git/**"
   - "{% if project_kind != 'macos-cli' %}.github/workflows/macos-ci.yml{% endif %}"
   - "{% if project_kind != 'macos-cli' %}scripts{% endif %}"
