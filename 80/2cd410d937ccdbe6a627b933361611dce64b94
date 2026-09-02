@@ -1,0 +1,14 @@
+tests/test_render_contract.py
+  h_c5be3b3dad7ca8 39-46,55,57,71,74,84-92,94-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "802cd410d937ccdbe6a627b933361611dce64b94",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
