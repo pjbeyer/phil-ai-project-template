@@ -36,8 +36,14 @@ class RenderContractTests(unittest.TestCase):
         subprocess.run(["git", "config", "user.email", "copier-test@example.invalid"], cwd=source, check=True)
         subprocess.run(["git", "config", "user.name", "Copier test"], cwd=source, check=True)
         subprocess.run(["git", "add", "."], cwd=source, check=True)
-        subprocess.run(["git", "commit", "-qm", "template fixture"], cwd=source, check=True)
-        subprocess.run(["git", "tag", "fixture-v0.1.2"], cwd=source, check=True)
+        subprocess.run(["git", "commit", "-qm", "template fixture v0.1.1"], cwd=source, check=True)
+        subprocess.run(["git", "tag", "v0.1.1"], cwd=source, check=True)
+
+        readme = source / "README.md.jinja"
+        readme.write_text(readme.read_text() + "\n<!-- Copier fixture v0.1.2 -->\n")
+        subprocess.run(["git", "add", "README.md.jinja"], cwd=source, check=True)
+        subprocess.run(["git", "commit", "-qm", "template fixture v0.1.2"], cwd=source, check=True)
+        subprocess.run(["git", "tag", "v0.1.2"], cwd=source, check=True)
         self.addCleanup(shutil.rmtree, root)
         return source
 
@@ -46,9 +52,9 @@ class RenderContractTests(unittest.TestCase):
         target = source.parent / kind
         assert COPIER is not None
         command = [
-            COPIER, "copy", "--trust", "--defaults", "--vcs-ref=fixture-v0.1.2",
+            COPIER, "copy", "--trust", "--defaults", "--vcs-ref=v0.1.1",
             "--data", "repository_owner=example", "--data", "repository_name=demo",
-            "--data", "project_kind=" + kind, "--data", "template_revision=v0.1.2",
+            "--data", "project_kind=" + kind, "--data", "template_revision=v0.1.1",
             str(source), str(target),
         ]
         subprocess.run(command, check=True, capture_output=True, text=True)
@@ -62,10 +68,10 @@ class RenderContractTests(unittest.TestCase):
         self.assertEqual(answers["repository_owner"], "example")
         self.assertEqual(answers["repository_name"], "demo")
         self.assertEqual(answers["project_kind"], kind)
-        self.assertEqual(answers["template_revision"], "v0.1.2")
+        self.assertEqual(answers["template_revision"], "v0.1.1")
         self.assertTrue(answers["_src_path"])
         self.assertNotIn("@", answers["_src_path"])
-        self.assertEqual(answers["_commit"], "fixture-v0.1.2")
+        self.assertEqual(answers["_commit"], "v0.1.1")
         self.assertNotRegex(json.dumps(answers), SECRET)
 
     def assert_update_works(self, target: Path) -> None:
@@ -75,11 +81,20 @@ class RenderContractTests(unittest.TestCase):
         subprocess.run(["git", "add", "."], cwd=target, check=True)
         subprocess.run(["git", "commit", "-qm", "initial render"], cwd=target, check=True)
         assert COPIER is not None
-        subprocess.run(
-            [COPIER, "update", "--trust", "--defaults", "--vcs-ref=fixture-v0.1.2"],
-            cwd=target, check=True, capture_output=True, text=True,
+        initial_readme = (target / "README.md").read_text()
+        self.assertNotIn("Copier fixture v0.1.2", initial_readme)
+        completed = subprocess.run(
+            [COPIER, "update", "--trust", "--defaults", "--vcs-ref=v0.1.2"],
+            cwd=target, capture_output=True, text=True,
         )
-        self.assertTrue((target / ".copier-answers.yml").is_file())
+        self.assertEqual(
+            completed.returncode, 0,
+            f"copier update failed:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+        )
+        answers = yaml.safe_load((target / ".copier-answers.yml").read_text())
+        self.assertEqual(answers["_commit"], "v0.1.2")
+        self.assertIn("Copier fixture v0.1.2", (target / "README.md").read_text())
+        self.assertNotEqual((target / "README.md").read_text(), initial_readme)
 
     def assert_common(self, target: Path, files: set[str], kind: str) -> None:
         self.assertTrue(COMMON <= files)
