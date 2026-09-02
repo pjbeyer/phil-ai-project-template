@@ -1,0 +1,18 @@
+copier.yml
+  h_c5be3b3dad7ca8 2,26,28-29
+tests/test_render_contract.py
+  h_c5be3b3dad7ca8 20-22,30-43,45-47,49-52,60-84,86,97,105,107,112,116,121,130
+"{{ _copier_conf.answers_file }}.jinja"
+  h_c5be3b3dad7ca8 1-2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "51092bce7e5511e3e37cfdab53df2c8e3841bf40",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
