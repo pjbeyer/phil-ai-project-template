@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+required=(README.md CONTRIBUTING.md AGENTS.md VERSION CHANGELOG.md release-please-config.json .release-please-manifest.json)
+for path in "${required[@]}"; do
+  test -f "$path" || { printf 'missing required operating file: %s\n' "$path" >&2; exit 1; }
+done
+
+test -f .github/workflows/release-please.yml
+! test -d src
+! test -f pyproject.toml
+! test -f package.json
+! test -f Formula/*.rb
+! test -f Casks/*.rb

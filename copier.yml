@@ -1,0 +1,34 @@
+_subdirectory: template
+_templates_suffix: .jinja
+
+repository_owner:
+  type: str
+  help: Verified GitHub repository owner.
+repository_name:
+  type: str
+  help: Verified GitHub repository name.
+project_description:
+  type: str
+  default: ""
+  help: Optional non-secret project description.
+project_kind:
+  type: str
+  choices:
+    Generic operating baseline: generic
+    macOS CLI operating baseline: macos-cli
+    Homebrew tap operating baseline: homebrew-tap
+template_revision:
+  type: str
+  default: v0.1.0
+  help: Immutable tag or commit selected by the provisioner.
+
+_exclude:
+  - "tests/**"
+  - ".git/**"
+  - "{% if project_kind != 'macos-cli' %}.github/workflows/macos-ci.yml{% endif %}"
+  - "{% if project_kind != 'macos-cli' %}scripts{% endif %}"
+  - "{% if project_kind != 'homebrew-tap' %}.github/workflows/homebrew-ci.yml{% endif %}"
+  - "{% if project_kind != 'homebrew-tap' %}Formula{% endif %}"
+  - "{% if project_kind != 'homebrew-tap' %}Formula/**{% endif %}"
+  - "{% if project_kind != 'homebrew-tap' %}Casks{% endif %}"
+  - "{% if project_kind != 'homebrew-tap' %}Casks/**{% endif %}"

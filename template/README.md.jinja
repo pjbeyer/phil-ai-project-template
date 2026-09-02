@@ -1,0 +1,19 @@
+# {{ repository_name }}
+
+{{ project_description if project_description else "Project operating baseline." }}
+
+## Status
+
+This repository was provisioned from the `{{ template_revision }}` operating-layer template as a **{{ project_kind }}** project. It intentionally contains no application implementation or dependency scaffold.
+
+## Next steps
+
+1. Define the project scope and update this README.
+2. Create the first SpecKit feature specification.
+3. Complete the repository's bootstrap Beads work before calling the project shippable.
+
+{% if project_kind == 'homebrew-tap' %}
+## Homebrew Actions setup
+
+Artifact-dependent CI jobs require the GitHub Actions secret `HOMEBREW_GITHUB_API_TOKEN`. Its value is never stored in this repository or provisioned by this template.
+{% endif %}

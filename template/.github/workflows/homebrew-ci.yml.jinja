@@ -1,0 +1,65 @@
+name: Homebrew tap CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tap-syntax:
+    runs-on: macos-latest
+    steps:
+      # v2.4.1
+      - uses: Homebrew/actions/setup-homebrew@f1cc9df7a62b7f6244414d21a3ebc3ba9156a082
+      - name: Validate tap syntax
+        run: |
+          for formula in Formula/*.rb; do [ -f "$formula" ] && brew style "$formula"; done
+          for cask in Casks/*.rb; do [ -f "$cask" ] && brew style --cask "$cask"; done
+          brew readall --aliases .
+
+  read-only-without-token:
+    needs: tap-syntax
+    runs-on: macos-latest
+    steps:
+      # v2.4.1
+      - uses: Homebrew/actions/setup-homebrew@f1cc9df7a62b7f6244414d21a3ebc3ba9156a082
+      - name: Ensure Homebrew token is absent
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ""
+        run: |
+          test -z "$HOMEBREW_GITHUB_API_TOKEN"
+          brew info --json=v2 . >/dev/null
+          brew list --formula
+          brew list --cask
+          brew search "${GITHUB_REPOSITORY#*/}" >/dev/null
+
+  test-formulae:
+    needs: tap-syntax
+    runs-on: macos-latest
+    steps:
+      # v2.4.1
+      - uses: Homebrew/actions/setup-homebrew@f1cc9df7a62b7f6244414d21a3ebc3ba9156a082
+      - name: Require package token only when formulae exist
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ '{{' }} secrets.HOMEBREW_GITHUB_API_TOKEN {{ '}}' }}
+        run: |
+          compgen -G 'Formula/*.rb' >/dev/null || exit 0
+          test -n "$HOMEBREW_GITHUB_API_TOKEN" || { echo 'Configure HOMEBREW_GITHUB_API_TOKEN out of band.' >&2; exit 1; }
+          for formula in Formula/*.rb; do brew audit --strict "$formula"; brew install --build-from-source "$formula"; brew test "$formula"; done
+
+  test-casks:
+    needs: tap-syntax
+    runs-on: macos-latest
+    steps:
+      # v2.4.1
+      - uses: Homebrew/actions/setup-homebrew@f1cc9df7a62b7f6244414d21a3ebc3ba9156a082
+      - name: Require package token only when casks exist
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ '{{' }} secrets.HOMEBREW_GITHUB_API_TOKEN {{ '}}' }}
+        run: |
+          compgen -G 'Casks/*.rb' >/dev/null || exit 0
+          test -n "$HOMEBREW_GITHUB_API_TOKEN" || { echo 'Configure HOMEBREW_GITHUB_API_TOKEN out of band.' >&2; exit 1; }
+          for cask in Casks/*.rb; do brew audit --cask "$cask"; brew install --cask "$cask"; brew uninstall --cask "$cask"; done
