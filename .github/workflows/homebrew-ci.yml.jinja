@@ -12,7 +12,7 @@ jobs:
   tap-syntax:
     runs-on: macos-latest
     steps:
-      # v2.4.1
+      # verified upstream commit 2026-04-24 (merge of PR #843); no tag anchor
       - uses: Homebrew/actions/setup-homebrew@f1cc9df7a62b7f6244414d21a3ebc3ba9156a082
       - name: Validate tap syntax
         run: |
@@ -24,7 +24,7 @@ jobs:
     needs: tap-syntax
     runs-on: macos-latest
     steps:
-      # v2.4.1
+      # verified upstream commit 2026-04-24 (merge of PR #843); no tag anchor
       - uses: Homebrew/actions/setup-homebrew@f1cc9df7a62b7f6244414d21a3ebc3ba9156a082
       - name: Ensure Homebrew token is absent
         env:
@@ -40,7 +40,7 @@ jobs:
     needs: tap-syntax
     runs-on: macos-latest
     steps:
-      # v2.4.1
+      # verified upstream commit 2026-04-24 (merge of PR #843); no tag anchor
       - uses: Homebrew/actions/setup-homebrew@f1cc9df7a62b7f6244414d21a3ebc3ba9156a082
       - name: Require package token only when formulae exist
         env:
@@ -54,7 +54,7 @@ jobs:
     needs: tap-syntax
     runs-on: macos-latest
     steps:
-      # v2.4.1
+      # verified upstream commit 2026-04-24 (merge of PR #843); no tag anchor
       - uses: Homebrew/actions/setup-homebrew@f1cc9df7a62b7f6244414d21a3ebc3ba9156a082
       - name: Require package token only when casks exist
         env:
