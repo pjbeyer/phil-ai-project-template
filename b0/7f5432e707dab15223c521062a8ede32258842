@@ -1,0 +1,16 @@
+.github/workflows/homebrew-ci.yml.jinja
+  h_c5be3b3dad7ca8 15,27,43,57
+.github/workflows/release-please.yml.jinja
+  h_c5be3b3dad7ca8 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "b07f5432e707dab15223c521062a8ede32258842",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
