@@ -16,6 +16,16 @@ ROOT = Path(__file__).resolve().parents[1]
 COPIER = shutil.which("copier")
 SHA = re.compile(r"@[0-9a-f]{40}(?:\s+#\s*[^\n]+)?$")
 SECRET = re.compile(r"(?:ghp_|github_pat_|AKIA|-----BEGIN|https://[^/@\s]+@)", re.I)
+# Reviewed upstream pin allowlist: every workflow action pin must resolve to a
+# real upstream commit. Map action@SHA -> verified upstream tag (checked against
+# the GitHub tags API on 2026-09-04). A drift to an unknown SHA fails locally.
+VERIFIED_ACTION_PINS = {
+    "googleapis/release-please-action@7987652d64b4581673a76e33ad5e98e3dd56832f": "v4.1.3",
+    "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683": "v4.2.2",
+    # No upstream tag anchor exists; verified as a real upstream commit
+    # (2026-04-24, merge of Homebrew/actions PR #843) via the commits API.
+    "Homebrew/actions/setup-homebrew@f1cc9df7a62b7f6244414d21a3ebc3ba9156a082": "2026-04-24",
+}
 COMMON = {
     ".copier-answers.yml", "README.md", "CONTRIBUTING.md", "AGENTS.md", ".gitignore",
     "VERSION", "CHANGELOG.md", "release-please-config.json", ".release-please-manifest.json",
@@ -109,6 +119,11 @@ class RenderContractTests(unittest.TestCase):
             for line in workflow.read_text().splitlines():
                 if "uses:" in line:
                     self.assertRegex(line.strip(), SHA)
+                    self.assertIn(
+                        line.strip().removeprefix("- uses: ").strip(),
+                        VERIFIED_ACTION_PINS,
+                        "action pin is not on the reviewed upstream SHA allowlist",
+                    )
         rendered = "\n".join(path.read_text(errors="ignore") for path in target.rglob("*") if path.is_file())
         self.assertNotRegex(rendered, SECRET)
         self.assertFalse((target / ".beads").exists())
