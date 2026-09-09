@@ -1472,6 +1472,10 @@ _FORBIDDEN_WORDS = {
 _ALLOWED_PROGRAMS = {"git", "dolt", "copier", "bd", "specify", "python3"}
 _BEADS_ENV_KEYS = ("BEADS_DOLT_PORT", "BEADS_DOLT_DATABASE")
 _COMMIT_MESSAGE = "chore: initialize project operating baseline"
+# Canonical live-gate order. G03 lands via pjb-m0ap.3.1 (render allowlist) and
+# G08 remains blocked by the completed G08-C prerequisite, but both occupy
+# their fixed positions so the sequence guard is total, not per-slice.
+_ORDERED_GATES = tuple(Gate)
 _CONSTITUTION = """# Project Constitution
 
 1. Contract before consequential automation.
@@ -1570,6 +1574,7 @@ class LiveAdapter:
         self._evidence: dict[Gate, str] = {}
         self._issues: dict[str, dict[str, Any]] = {}
         self._git_head: str | None = None
+        self._completed_gates: set[Gate] = set()
 
     @staticmethod
     def _require_available() -> None:
@@ -1721,6 +1726,7 @@ class LiveAdapter:
 
     def run_gate(self, gate: Gate) -> None:
         self._require_available()
+        self._assert_gate_reachable(gate)
         dispatch = {
             Gate.PREFLIGHT: self._g01,
             Gate.CLONE: self._g02,
@@ -1734,7 +1740,25 @@ class LiveAdapter:
             Gate.COMMIT: self._g10,
             Gate.PUSH: self._g11,
         }
-        dispatch[gate]()
+        handler = dispatch[gate]
+        handler()
+        self._completed_gates.add(gate)
+
+    def _assert_gate_reachable(self, gate: Gate) -> None:
+        """Fail closed unless every predecessor gate has completed its readback.
+
+        Enforces the .3.6 ordering criterion: a gate is reachable only after
+        each earlier gate's readback is asserted, so no gate may run out of
+        sequence and none may pass on a bare directory-exists claim.
+        """
+        if gate not in _ORDERED_GATES:
+            raise AdapterError(f"{gate.value} is not a recognized ordered gate")
+        index = _ORDERED_GATES.index(gate)
+        for predecessor in _ORDERED_GATES[:index]:
+            if predecessor not in self._completed_gates:
+                raise AdapterError(
+                    f"{gate.value} is unreachable before {predecessor.value} completes its readback"
+                )
 
     def gate_evidence(self, gate: Gate) -> str:
         self._require_available()
