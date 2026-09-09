@@ -19,7 +19,7 @@ project_kind:
     Homebrew tap operating baseline: homebrew-tap
 template_revision:
   type: str
-  default: v0.1.0
+  default: v0.1.4
   help: Immutable tag or commit selected by the provisioner.
 
 _exclude:
