@@ -35,3 +35,5 @@ _exclude:
   - "{% if project_kind != 'homebrew-tap' %}Formula/**{% endif %}"
   - "{% if project_kind != 'homebrew-tap' %}Casks{% endif %}"
   - "{% if project_kind != 'homebrew-tap' %}Casks/**{% endif %}"
+  - "provisioning-skill"
+  - "provisioning-skill/**"
