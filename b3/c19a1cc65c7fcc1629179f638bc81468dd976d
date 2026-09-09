@@ -1,0 +1,16 @@
+provisioning-skill/scripts/adapters.py
+  h_c5be3b3dad7ca8 1475-1478,1577,1729,1743-1761
+provisioning-skill/tests/test_gate_order.py
+  h_c5be3b3dad7ca8 1-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b3c19a1cc65c7fcc1629179f638bc81468dd976d",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
