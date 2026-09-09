@@ -47,6 +47,7 @@ from .models import (
     ImmutableLiveConfiguration,
     ProvisioningEvidence,
     ProvisioningRequest,
+    RenderProvenance,
 )
 from .preflight import (
     PreflightError,
@@ -906,6 +907,13 @@ class ControlledG01G03Controller:
             self._persist_owned(evidence)
             return evidence
 
+        provenance = RenderProvenance.capture(
+            configuration,
+            repository_owner=origin.owner,
+            repository_name=origin.repository,
+            project_kind=request.project_kind,
+            project_description=request.description,
+        )
         evidence = ProvisioningEvidence(
             run_id=run_id,
             request_fingerprint=fingerprint,
@@ -914,6 +922,7 @@ class ControlledG01G03Controller:
             state="blocked-preflight",
             template_revision=configuration.resolved_template_commit,
             simulation=True,
+            render_provenance=provenance,
         )
         self._active_evidence = evidence
         self._assert_exact_directory_chain(

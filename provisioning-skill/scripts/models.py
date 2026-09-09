@@ -16,6 +16,7 @@ from typing import Any, Literal, Mapping
 from urllib.parse import urlparse
 
 ProjectKind = Literal["generic", "macos-cli", "homebrew-tap"]
+_PROJECT_KINDS = frozenset({"generic", "macos-cli", "homebrew-tap"})
 ResultState = Literal[
     "complete", "blocked-preflight", "partial", "verified-existing", "simulation-passed",
 ]
@@ -301,6 +302,87 @@ class ComponentPin:
             "source_identity": self.source_identity,
             "resolved_commit": self.resolved_commit,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RenderProvenance:
+    """Non-secret provenance persisted durably before the render mutation.
+
+    Recording this is not a claim that a render or an FR-008/FR-019 readback
+    succeeded; it is only the supply-chain authority captured before G03 mutates
+    any filesystem. Every value is admitted through the unsafe-text policy, so a
+    secret-shaped value, credential pointer, URL userinfo, or private absolute
+    path is rejected rather than persisted.
+    """
+
+    template_source_identity: str
+    template_tag: str
+    resolved_template_commit: str
+    submitted_answers: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        _require_fixed_string(
+            self.template_source_identity,
+            next(iter(APPROVED_TEMPLATE_SOURCE_IDENTITIES)),
+            "render provenance template source identity",
+        )
+        _require_version_tag(self.template_tag, "render provenance template tag")
+        _require_minimum_template_tag(self.template_tag, "render provenance template tag")
+        _require_full_sha(self.resolved_template_commit, "render provenance resolved commit")
+        if type(self.submitted_answers) is not tuple or not self.submitted_answers:
+            raise ConfigurationError("render provenance answers must be a nonempty tuple")
+        seen: set[str] = set()
+        for key, value in self.submitted_answers:
+            admitted_key = _reject_unsafe_text(key, "render provenance answer key")
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", admitted_key) is None:
+                raise ConfigurationError("render provenance answer key has an unsafe shape")
+            if admitted_key in seen:
+                raise ConfigurationError("render provenance answers must be unique")
+            seen.add(admitted_key)
+            _reject_unsafe_text(value, f"render provenance answer {admitted_key}")
+
+    def canonical_fields(self) -> dict[str, object]:
+        return {
+            "template_source_identity": self.template_source_identity,
+            "template_tag": self.template_tag,
+            "resolved_template_commit": self.resolved_template_commit,
+            "submitted_answers": {key: value for key, value in self.submitted_answers},
+        }
+
+    @classmethod
+    def capture(
+        cls,
+        configuration: ImmutableLiveConfiguration,
+        *,
+        repository_owner: str,
+        repository_name: str,
+        project_kind: str,
+        project_description: str,
+    ) -> RenderProvenance:
+        """Derive the pre-render provenance record from the exact approved inputs."""
+        if cls is not RenderProvenance:
+            raise ConfigurationError("render provenance capture subclasses are not admitted")
+        admitted_owner = _reject_unsafe_text(repository_owner, "render provenance repository owner")
+        if admitted_owner not in {"flexapp", "pjbeyer"}:
+            raise ConfigurationError("render provenance repository owner is outside approved routing")
+        admitted_name = _reject_unsafe_text(repository_name, "render provenance repository name")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", admitted_name) is None:
+            raise ConfigurationError("render provenance repository name is outside approved routing")
+        if type(project_kind) is not str or project_kind not in _PROJECT_KINDS:
+            raise ConfigurationError("render provenance project kind is not an approved kind")
+        _reject_unsafe_text(project_description, "render provenance project description", allow_empty=True)
+        submitted_answers = (
+            ("repository_owner", admitted_owner),
+            ("repository_name", admitted_name),
+            ("project_kind", project_kind),
+            ("project_description", project_description),
+        )
+        return cls(
+            configuration.template_source_identity,
+            configuration.template_tag,
+            configuration.resolved_template_commit,
+            submitted_answers,
+        )
 
 
 def _canonical_configuration_payload(configuration: ImmutableLiveConfiguration) -> str:
@@ -869,6 +951,10 @@ class ProvisioningEvidence:
     resume_requirement: str | None = None
     next_action: str = ""
     simulation: bool = False
+    render_provenance: RenderProvenance | None = None
 
     def serializable(self) -> dict:
-        return asdict(self)
+        payload = asdict(self)
+        if self.render_provenance is not None:
+            payload["render_provenance"] = self.render_provenance.canonical_fields()
+        return payload
