@@ -129,6 +129,14 @@ class RenderContractTests(unittest.TestCase):
         self.assertNotRegex(rendered, SECRET)
         self.assertFalse((target / ".beads").exists())
         self.assertFalse((target / ".specify").exists())
+        # FR-026: the operator-side provisioning skill must never render. The
+        # exclude entry is absolute; any leak here is a release blocker.
+        leaked_skill = [p for p in files if p == "provisioning-skill" or p.startswith("provisioning-skill/")]
+        self.assertEqual(
+            leaked_skill,
+            [],
+            "provisioning-skill leaked into rendered output: " + ", ".join(leaked_skill),
+        )
 
     def test_generic_render_contract(self) -> None:
         target = self.render("generic")
