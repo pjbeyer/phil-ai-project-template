@@ -164,7 +164,7 @@ def _load_initial_regular(path: Path, label: str) -> bytes:
         after = path.lstat()
     except OSError as error:
         raise ControlledG11Error(f"controlled G11 {label} was unavailable") from error
-    stable = lambda m: (m.st_dev, m.st_ino, m.st_mode, m.st_size, m.st_mtime_ns, m.st_ctime_ns)  # noqa: E731
+    stable = lambda m: (m.st_dev, m.st_ino, m.st_mode, m.st_uid, m.st_gid, m.st_size, m.st_mtime_ns, m.st_ctime_ns)  # noqa: E731
     if (
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISREG(metadata.st_mode)

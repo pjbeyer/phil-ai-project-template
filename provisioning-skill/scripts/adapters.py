@@ -1623,10 +1623,18 @@ class LiveAdapter:
         except ValueError as error:
             raise AdapterError(f"invalid immutable live configuration: {error}") from error
 
-    def _context(self) -> tuple[ProvisioningRequest, ParsedOrigin, Path, LiveAdapterConfig]:
+    def _context(self) -> tuple[ProvisioningRequest, ParsedOrigin, Path, object]:
+        self._require_available()
         if not self._prepared or not all((self.request, self.origin, self.destination, self.config)):
             raise AdapterError("live adapter is not authorized and prepared")
-        return self.request, self.origin, self.destination, self.config  # type: ignore[return-value]
+        # The retained draft's gate bodies below still reference the removed
+        # ``LiveAdapterConfig`` surface (command_env, coverage_script,
+        # template_source, manifest_path, expected_backup_user/group, and
+        # extension_pins/preset_pins). They are not a usable redesign reference
+        # against the current ``ImmutableLiveConfiguration``; fail closed with the
+        # controlled unavailable error rather than an AttributeError on the first
+        # dereferenced field.
+        raise AdapterError(_LIVE_UNAVAILABLE_MESSAGE)
 
     def _env(self, *, beads: bool = False) -> Mapping[str, str]:
         _, _, _, config = self._context()

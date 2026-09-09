@@ -1001,6 +1001,54 @@ class LegacyLiveAdapterQuarantineTests(unittest.TestCase):
                 ):
                     call()
 
+    def test_context_and_gate_bodies_fail_closed_not_attributerror(self) -> None:
+        """Even with quarantine flipped, the stale draft must not surface
+        AttributeError from its removed-config references (review T059 BLOCKER).
+
+        The retained gate bodies (``_g03``..``_g08``, ``_env``, ``_execute``,
+        backup helpers) still dereference fields of the removed
+        ``LiveAdapterConfig`` (command_env, coverage_script, template_source,
+        manifest_path, expected_backup_user/group, extension_pins/preset_pins).
+        ``_context`` — the choke point every one of them passes through — must
+        convert that into a controlled AdapterError, never an AttributeError.
+        """
+        import scripts.adapters as adapters_module
+
+        original = adapters_module._LIVE_EXECUTION_AVAILABLE
+        try:
+            adapters_module._LIVE_EXECUTION_AVAILABLE = True
+            # A bare, unprepared adapter: _context must raise the controlled
+            # unavailable error (not AttributeError) before touching any config
+            # field, regardless of the flag.
+            adapter = LiveAdapter()
+            with self.assertRaises(AdapterError):
+                adapter._context()
+            # Prepared with a fully-valid immutable config: the stale gate body
+            # references are still unreachable — _context hard-raises the
+            # controlled unavailable error instead of returning a config whose
+            # fields no longer exist.
+            config = ImmutableLiveConfiguration.create(
+                repository_identity="pjbeyer/demo",
+                template_source_identity="pjbeyer/phil-ai-project-template",
+                template_tag="v0.1.3",
+                resolved_template_commit="1" * 40,
+                component_pins={
+                    name: ComponentPin(name, f"speckit/component/{name}", "1" * 40)
+                    for name in APPROVED_COMPONENT_NAMES
+                },
+            )
+            adapter.config = config
+            adapter.request = ProvisioningRequest(
+                "https://github.com/pjbeyer/demo.git", "demo", "generic"
+            )
+            adapter.origin = SimpleNamespace(identity="pjbeyer/demo")
+            adapter.destination = Path("/Users/synthetic-home/Projects/pjbeyer/demo")
+            adapter._prepared = True
+            with self.assertRaisesRegex(AdapterError, "not yet approved or implemented"):
+                adapter._context()
+        finally:
+            adapters_module._LIVE_EXECUTION_AVAILABLE = original
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
