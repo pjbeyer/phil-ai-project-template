@@ -30,6 +30,7 @@ COMMON = {
     ".copier-answers.yml", "README.md", "CONTRIBUTING.md", "AGENTS.md", ".gitignore",
     "VERSION", "CHANGELOG.md", "release-please-config.json", ".release-please-manifest.json",
     ".github/workflows/release-please.yml",
+    ".agents/skills/project-operating-baseline/SKILL.md",
 }
 
 
