@@ -616,3 +616,47 @@ def _controlled_g09_for_test(
         request=request,
         g07_evidence=g07_evidence,
     )
+
+
+def _validate_g09_evidence(
+    evidence: ProvisioningEvidence,
+    authority: tuple[str, str, str],
+) -> ProvisioningEvidence:
+    """Validate a completed controlled-G09 predecessor without trusting its detail text.
+
+    Structural invariants only: exact gate status sequence (including the
+    mandatory ``skipped`` live-G08 fence), state, sim flag, mutation ordering,
+    authority database, and repository identity. The bootstrap detail is a
+    f-string and is deliberately not matched byte-exactly.
+    """
+    if type(evidence) is not ProvisioningEvidence:
+        raise ControlledG09Error("controlled G09 requires exact G09 evidence")
+    try:
+        snapshot = deepcopy(evidence)
+    except Exception as error:
+        raise ControlledG09Error("controlled G09 could not snapshot evidence") from error
+    expected_statuses = [
+        (Gate.MANIFEST, "passed"),
+        (Gate.BACKUP, "passed"),
+        (Gate.SPECKIT, "skipped"),
+        (Gate.BOOTSTRAP, "passed"),
+    ]
+    if (
+        snapshot.state != "partial"
+        or snapshot.failed_gate is not None
+        or snapshot.simulation is not True
+        or snapshot.actual_database != authority[2]
+        or snapshot.repository_identity != "controlled-fixture/g09"
+        or snapshot.mutation_attempts != [_G06_ATTEMPT, _G07_INIT, _G07_SYNC, _G09_ATTEMPT]
+        or snapshot.mutations_completed != [_G06_ATTEMPT, _G07_INIT, _G07_SYNC, _G09_ATTEMPT]
+        or [(i.gate, i.status) for i in snapshot.gates] != expected_statuses
+    ):
+        raise ControlledG09Error(
+            "controlled G09 requires completed descriptor-bound controlled G09 evidence"
+        )
+    for item in snapshot.gates:
+        if item.gate is Gate.SPECKIT and item.status == "passed":
+            raise ControlledG09Error(
+                "controlled G09 evidence must never claim live G08 passed"
+            )
+    return snapshot
