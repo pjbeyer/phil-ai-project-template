@@ -1,0 +1,18 @@
+provisioning-skill/scripts/_controlled_g10.py
+  h_c5be3b3dad7ca8 412,421-422
+provisioning-skill/scripts/_controlled_g11.py
+  h_c5be3b3dad7ca8 436-437,450-453
+provisioning-skill/tests/test_g08_fence_validators.py
+  h_c5be3b3dad7ca8 1-99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "59ecb3e10c06910c2f336990849dedd1bb1049fc",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
