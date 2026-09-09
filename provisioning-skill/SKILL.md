@@ -126,3 +126,25 @@ claim FR-008/FR-019 completion from a render alone.
 ## Documentation and delivery
 
 Update the template README and this skill with behavior changes. Keep template and skill commits separate and atomic. Before calling an implementation complete: run tests, review staged content for secret-shaped material and local paths, commit with Conventional Commits, push as authorized, and independently verify remote state.
+
+## Installation (operator-side)
+
+This skill is versioned in the public template repository
+(`pjbeyer/phil-ai-project-template`) at the `provisioning-skill/` path and is
+excluded from every Copier render — it provisions repositories, so it must be
+installed *before* the repository it creates.
+
+1. Choose an approved immutable revision (tag, or the resolved commit pinned to
+   it) from the distribution history. Never install from a mutable ref.
+2. Fetch the `provisioning-skill/` directory at that revision into the
+   operator's agent skill root (e.g. the agent's `skills/` directory, keeping
+   the directory name `project-provisioning`).
+3. Configure `PROVISIONING_APPROVED_HOME` (or `approved_project_home` in the
+   approved config file) to the operator's project root. The skill fails closed
+   when neither is set.
+4. Verify the installed copy: run `python3 -m unittest discover -s tests -v`
+   from the skill directory and confirm the full suite passes before invoking
+   it for provisioning.
+
+A provenance mismatch (resolved commit does not match the approved tag) or a
+failing installed-copy suite must stop installation.
