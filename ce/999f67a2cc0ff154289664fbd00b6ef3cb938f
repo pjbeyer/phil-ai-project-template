@@ -1,0 +1,18 @@
+provisioning-skill/scripts/models.py
+  h_c5be3b3dad7ca8 19,307-387,954,957-960
+provisioning-skill/scripts/provision_project.py
+  h_c5be3b3dad7ca8 50,910-916,925
+provisioning-skill/tests/test_render_provenance.py
+  h_c5be3b3dad7ca8 1-167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ce999f67a2cc0ff154289664fbd00b6ef3cb938f",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
