@@ -1,0 +1,29 @@
+provisioning-skill/scripts/manifest.py
+  s_19d939b1a11f45::t_3779ea44848b88 1-216
+provisioning-skill/tests/_debug_controlled.py
+  s_c5113d6eaca061::t_f144ec8308b2df 1-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "34b74ad1d107f4b9dae1d9964dbf6f063c917aa0",
+  "prompts": {},
+  "sessions": {
+    "s_19d939b1a11f45": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a066ab-f6d6-71f0-a969-1c00bdd34ebf",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    },
+    "s_c5113d6eaca061": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a067b1-b0b0-7910-94aa-4ab556db953f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
