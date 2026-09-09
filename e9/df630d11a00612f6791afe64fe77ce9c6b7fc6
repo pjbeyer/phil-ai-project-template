@@ -1,0 +1,14 @@
+provisioning-skill/tests/test_evidence_hygiene.py
+  h_c5be3b3dad7ca8 1-174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e9df630d11a00612f6791afe64fe77ce9c6b7fc6",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
