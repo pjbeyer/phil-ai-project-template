@@ -433,6 +433,8 @@ class _ControlledG11Controller:
         git_fd = self._session.directory_fd("git")
         dolt_fd = self._session.directory_fd("dolt")
         try:
+            git_stat = os.fstat(git_fd)
+            dolt_stat = os.fstat(dolt_fd)
             git_raw, _ = self._session.read_pinned_regular(
                 "git", "upstream.json", label="git upstream"
             )
@@ -445,6 +447,10 @@ class _ControlledG11Controller:
                 raise ControlledG11Error("controlled dolt push readback was not exact")
             self._assert_predecessor_bindings()
             self._session.assert_bindings()
+            if os.fstat(git_fd).st_dev != git_stat.st_dev:
+                raise ControlledG11Error("controlled git descriptor changed device")
+            if os.fstat(dolt_fd).st_dev != dolt_stat.st_dev:
+                raise ControlledG11Error("controlled dolt descriptor changed device")
         finally:
             os.close(dolt_fd)
             os.close(git_fd)

@@ -409,6 +409,7 @@ class _ControlledG10Controller:
         self._assert_predecessor_bindings()
         git_fd = self._session.directory_fd("git")
         try:
+            git_stat = os.fstat(git_fd)
             expected = _commit_record(self._request.database, self._request.markers)
             raw, _ = self._session.read_pinned_regular(
                 "git", "COMMIT_EDITMSG", label="commit record"
@@ -417,8 +418,8 @@ class _ControlledG10Controller:
                 raise ControlledG10Error("controlled commit record readback was not exact")
             self._assert_predecessor_bindings()
             self._session.assert_bindings()
-            if os.fstat(git_fd).st_dev != os.fstat(git_fd).st_dev:
-                pass  # device identity already enforced by session bindings
+            if os.fstat(git_fd).st_dev != git_stat.st_dev:
+                raise ControlledG10Error("controlled git descriptor changed device")
         finally:
             os.close(git_fd)
 
