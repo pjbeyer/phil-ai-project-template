@@ -1,0 +1,14 @@
+provisioning-skill/scripts/_controlled_g09.py
+  h_c5be3b3dad7ca8 618-662
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "23a83988de86dba91aca326da42a160c793e57e5",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
