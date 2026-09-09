@@ -1,0 +1,14 @@
+copier.yml
+  h_c5be3b3dad7ca8 38-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "f2753b5dc81815cecdc7d0fea7a0f401cae30bbe",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
