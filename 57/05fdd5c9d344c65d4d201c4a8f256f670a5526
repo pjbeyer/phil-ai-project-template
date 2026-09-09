@@ -1,0 +1,22 @@
+provisioning-skill/scripts/_controlled_g09.py
+  h_c5be3b3dad7ca8 167
+provisioning-skill/scripts/_controlled_g10.py
+  h_c5be3b3dad7ca8 162
+provisioning-skill/scripts/_controlled_g11.py
+  h_c5be3b3dad7ca8 167
+provisioning-skill/scripts/adapters.py
+  h_c5be3b3dad7ca8 1626-1627,1630-1637
+provisioning-skill/tests/test_live_authorization.py
+  h_c5be3b3dad7ca8 1004-1051
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "5705fdd5c9d344c65d4d201c4a8f256f670a5526",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
