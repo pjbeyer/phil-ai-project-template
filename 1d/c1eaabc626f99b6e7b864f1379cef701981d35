@@ -1,0 +1,16 @@
+provisioning-skill/scripts/_controlled_g11.py
+  h_c5be3b3dad7ca8 1-554
+provisioning-skill/tests/test_controlled_g11.py
+  h_c5be3b3dad7ca8 1-285
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1dc1eaabc626f99b6e7b864f1379cef701981d35",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
