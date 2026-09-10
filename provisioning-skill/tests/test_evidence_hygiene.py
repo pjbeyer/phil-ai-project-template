@@ -57,15 +57,27 @@ _FORBIDDEN_IMPORTS = (
 # remain forbidden.
 _SUBPROCESS_ALLOWED_MODULE = "production_transport.py"
 
-# The transport module itself must also never be imported by any other shipped
-# script (it is the only reachable subprocess surface). Its name and public
-# symbols are forbidden imports everywhere except within the module itself.
+# The transport module's *raw capability surface* must never be imported by any
+# other shipped script: the factory closure, the capability type, and the
+# transport class itself are the only reachable subprocess authority. Only the
+# reviewed entry point ``make_production_executor`` is importable, and only by
+# the single reviewed consumer ``adapters.py`` (Slice B).
+#
+# These patterns match the *import surface* (``import``/``from ... import``),
+# not prose or the ``_ProductionTransport`` Protocol seam in live_executor.py.
 _TRANSPORT_IMPORT_PATTERNS = (
-    "production_transport",
-    "ProductionTransport",
+    "import production_transport",
+    "from .production_transport import",
+    "from scripts.production_transport import",
     "_for_authorized_executor",
     "_ProductionTransportCapability",
+    "_make_authorized_factory",
 )
+
+# The one reviewed consumer allowed to import the transport entry point.
+_TRANSPORT_CONSUMER_MODULE = "adapters.py"
+# The one reviewed entry point that consumer may import.
+_TRANSPORT_ENTRY_POINT = "make_production_executor"
 
 
 def _source_texts() -> list[Path]:
@@ -176,12 +188,32 @@ class EvidenceHygieneTests(unittest.TestCase):
                         if forbidden.startswith(("import subprocess", "from subprocess")) and path.name == _SUBPROCESS_ALLOWED_MODULE:
                             continue
                         findings.append(f"{path.name}:{lineno}: {forbidden}")
-                # The transport module and its symbols must never be imported by
-                # any other shipped script (mechanical gate for review Finding 2).
+                # The transport module's raw capability surface must never be
+                # imported by any other shipped script (mechanical gate for
+                # review Finding 2). The reviewed entry point
+                # ``make_production_executor`` is importable only by the single
+                # reviewed consumer (adapters.py).
                 if path.name != _SUBPROCESS_ALLOWED_MODULE:
                     for pattern in _TRANSPORT_IMPORT_PATTERNS:
                         if pattern in line:
+                            # The reviewed entry point is importable only by the
+                            # single reviewed consumer (adapters.py). A
+                            # `from .production_transport import` line carrying
+                            # that entry point in that consumer is allowed.
+                            if (
+                                pattern.startswith("from .production_transport import")
+                                and _TRANSPORT_ENTRY_POINT in line
+                                and path.name == _TRANSPORT_CONSUMER_MODULE
+                            ):
+                                continue
                             findings.append(f"{path.name}:{lineno}: imports {pattern}")
+                    if (
+                        _TRANSPORT_ENTRY_POINT in line
+                        and path.name != _TRANSPORT_CONSUMER_MODULE
+                    ):
+                        findings.append(
+                            f"{path.name}:{lineno}: imports {_TRANSPORT_ENTRY_POINT} outside the reviewed consumer"
+                        )
         self.assertEqual(
             findings, [], "forbidden transport/code-exec imports present:\n" + "\n".join(findings)
         )

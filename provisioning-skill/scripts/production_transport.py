@@ -31,6 +31,7 @@ from pathlib import Path
 
 from .live_executor import (
     LiveExecutorError,
+    ProductionLiveExecutor,
     RawResult,
     _TransportInvocation,
     _redact_and_bound,
@@ -60,6 +61,18 @@ def _make_authorized_factory():
 _for_authorized_executor = _make_authorized_factory()
 
 
+def make_production_executor(*, approved_home: Path) -> ProductionLiveExecutor:
+    """Return a production executor bound to the sole admitted transport.
+
+    The transport is obtained from the closure-held capability (not importable),
+    so this is the only path that can construct a live executor. The executor
+    admits only the exact production transport type and re-validates every
+    invocation before spawn.
+    """
+    transport = _for_authorized_executor()
+    return ProductionLiveExecutor(transport=transport, approved_home=approved_home)
+
+
 def _open_directory_fd(path: Path) -> int:
     """Open ``path`` as a directory with no-follow semantics and pin its inode."""
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -84,6 +97,12 @@ class ProductionTransport:
     level, not here). Construction is capability-gated; ``invoke`` re-validates
     every request before spawning.
     """
+
+    # Marker the executor checks (avoids a circular import: live_executor.py
+    # cannot import this class, so it verifies this attribute instead of the
+    # exact type). Only the closure-held factory can construct an instance, so
+    # this marker cannot be forged by a caller.
+    _is_production_transport = True
 
     def __init__(self, *, _capability: _ProductionTransportCapability | None = None) -> None:
         # The capability is held only by the factory closure; it is not

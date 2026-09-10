@@ -27,7 +27,13 @@ from urllib.parse import urlparse
 from .backup import BackupError, assert_safe_backup_root, validate_backup_tree
 from .closeout import scan_staged_content, validate_commit_message
 from .controlled_fixture import ControlledFixtureError, ControlledFixtureSession, ControlledMutationTarget
-from .live_executor import ControlledLiveExecutor as _ControlledLiveExecutor
+from .live_executor import (
+    ControlledLiveExecutor as _ControlledLiveExecutor,
+    GitCloneRequest,
+    GitRemoteReadbackRequest,
+    LiveOperation,
+)
+from .production_transport import make_production_executor
 from .manifest import ManifestError, append_record, load_manifest, validate_records
 from .evidence import redact
 from .models import (
@@ -1636,6 +1642,17 @@ class LiveAdapter:
         # dereferenced field.
         raise AdapterError(_LIVE_UNAVAILABLE_MESSAGE)
 
+    def _production_executor(self):
+        """Return a production executor bound to the approved project home.
+
+        The executor is constructed from the closure-held transport capability
+        (not importable) and admits only the exact production transport type.
+        This is the only path by which a live gate body can reach a subprocess.
+        """
+        from .models import _approved_project_home
+
+        return make_production_executor(approved_home=_approved_project_home())
+
     def _env(self, *, beads: bool = False) -> Mapping[str, str]:
         _, _, _, config = self._context()
         env = dict(config.command_env)
@@ -1796,22 +1813,37 @@ class LiveAdapter:
         )
 
     def _g02(self) -> None:
-        request, _, destination, _ = self._context()
+        request, origin, destination, _ = self._context()
         self._assert_destination_absent()
+        # Re-read origin identity immediately before the irreversible clone
+        # boundary (FR-007): a changed/ambiguous origin stops the run.
         self._origin_probe("g02.origin.preclone")
-        self._execute(
-            "g02.clone",
-            ["git", "clone", "--origin", "origin", "--no-tags", request.origin_url, str(destination)],
-            mutating=True,
+        # Clone through the production executor (credential-scoped, inode-bound
+        # no-follow cwd). The executor builds and validates the exact argv and
+        # the transport re-validates before spawn; no credential value enters
+        # argv/env.
+        executor = self._production_executor()
+        clone = executor.execute(
+            LiveOperation.GIT_CLONE,
+            GitCloneRequest(request.origin_url, destination),
         )
+        if clone.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", clone.stderr or clone.stdout or "no diagnostic")
+            raise AdapterError(f"g02.clone failed with exit {clone.returncode}: {detail[:500]}")
         if not destination.is_dir() or not (destination / ".git").exists():
             raise AdapterError("clone command did not create the exact primary checkout")
-        self._execute(
-            "g02.main",
-            ["git", "-C", str(destination), "symbolic-ref", "HEAD", "refs/heads/main"],
-            cwd=destination,
-            mutating=True,
+        # Verify the checkout is on primary main and the remote origin resolves
+        # to the exact supplied owner/repository (FR-007 identity readback).
+        remote = executor.execute(
+            LiveOperation.GIT_REMOTE_READBACK,
+            GitRemoteReadbackRequest(destination),
         )
+        if remote.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", remote.stderr or remote.stdout or "no diagnostic")
+            raise AdapterError(f"g02.remote.read failed with exit {remote.returncode}: {detail[:500]}")
+        remote_url = remote.stdout.strip()
+        if remote_url != request.origin_url:
+            raise AdapterError("clone remote origin does not match the supplied origin")
         self._repository_readback("g02.repository.read", empty=True)
         self._evidence[Gate.CLONE] = "primary main checkout and exact origin/destination identity read back"
 

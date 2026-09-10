@@ -22,11 +22,20 @@ class LiveExecutorError(ValueError):
 
 
 class LiveOperation(Enum):
-    """The complete read-only operation set admitted by this executor slice."""
+    """The complete operation set admitted by this executor slice.
+
+    Read-only ops (preflight/probe/readback) are safe under the test transport.
+    ``GIT_CLONE`` is the first mutating op: it builds a validated argv but is
+    intentionally unavailable under the test transport (no in-memory transport
+    can perform a real clone); only the separately-reviewed production transport
+    executes it.
+    """
 
     GIT_REMOTE_PREFLIGHT = "git-remote-preflight"
     LOCAL_GIT_READBACK = "local-git-readback"
     CENTRAL_DOLT_PROBE = "central-dolt-probe"
+    GIT_CLONE = "git-clone"
+    GIT_REMOTE_READBACK = "git-remote-readback"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +51,27 @@ class LocalGitReadbackRequest:
 
     owner: str
     repository: str
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitCloneRequest:
+    """Clone an empty, approved origin into the canonical absent destination.
+
+    The origin must be a credential-free HTTPS github.com URL under an approved
+    owner; the destination must be an absolute, traversal-free path that does
+    not yet exist. Authentication is delegated to the operator's credential
+    helper (never a credential value in argv/env).
+    """
+
+    origin_url: str
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitRemoteReadbackRequest:
+    """Read the remote origin URL of a local checkout for identity verification."""
+
     path: Path
 
 
@@ -263,6 +293,66 @@ def _local_git_argv(request: LocalGitReadbackRequest, home: Path) -> tuple[tuple
     ), request.path
 
 
+def _git_clone_argv(request: GitCloneRequest) -> tuple[tuple[str, ...], Path | None]:
+    """Build the exact, credential-free clone argv for an approved origin.
+
+    The destination must be absolute, traversal-free, and not yet exist (the
+    adapter asserts absence before calling this). The clone is a full checkout
+    of the empty origin's primary branch; ``--no-tags`` avoids pulling any
+    mutable tag surface. Authentication is delegated to the operator's
+    credential helper via the fixed minimal environment (no credential value).
+    """
+    if not isinstance(request.destination, Path) or not request.destination.is_absolute():
+        raise LiveExecutorError("clone destination must be an absolute path")
+    if ".." in request.destination.parts:
+        raise LiveExecutorError("clone destination path traversal is forbidden")
+    path_text = str(request.destination)
+    _reject_secret_or_unsafe_text(path_text, "clone destination")
+    _reject_secret_or_unsafe_text(request.origin_url, "clone origin URL")
+    parsed = urlparse(request.origin_url)
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise LiveExecutorError("clone origin URL must not contain credential userinfo")
+    match = _GITHUB_HTTPS.fullmatch(request.origin_url)
+    if match is None:
+        raise LiveExecutorError("clone origin must be a credential-free HTTPS github.com repository URL")
+    owner = match.group("owner")
+    repository = match.group("repository")
+    if owner not in _ALLOWED_OWNERS:
+        raise LiveExecutorError("clone origin owner is outside the approved owner set")
+    if repository in {".", ".."}:
+        raise LiveExecutorError("clone origin repository name is unsafe")
+    return (
+        "git",
+        "clone",
+        "--origin",
+        "origin",
+        "--no-tags",
+        request.origin_url,
+        path_text,
+    ), None
+
+
+def _git_remote_readback_argv(request: GitRemoteReadbackRequest) -> tuple[tuple[str, ...], Path]:
+    """Read the local checkout's origin remote URL (identity readback)."""
+    if not isinstance(request.path, Path) or not request.path.is_absolute():
+        raise LiveExecutorError("remote readback path must be absolute")
+    if ".." in request.path.parts:
+        raise LiveExecutorError("remote readback path traversal is forbidden")
+    path_text = str(request.path)
+    _reject_secret_or_unsafe_text(path_text, "remote readback path")
+    return (
+        "git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        path_text,
+        "remote",
+        "get-url",
+        "origin",
+    ), request.path
+
+
 def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path | None]:
     del request
     return (
@@ -325,7 +415,7 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
 
 
 class ControlledLiveExecutor:
-    """Map closed read-only operations to hard-coded argv for test transport.
+    """Map closed operations to hard-coded argv for the test transport.
 
     There is intentionally no ``run(argv)`` method and no production transport.
     A separately reviewed internal factory must own any future construction.
@@ -349,49 +439,26 @@ class ControlledLiveExecutor:
     def execute(
         self,
         operation: LiveOperation,
-        parameters: GitRemotePreflightRequest | LocalGitReadbackRequest | CentralDoltProbeRequest,
+        parameters: GitRemotePreflightRequest | LocalGitReadbackRequest | CentralDoltProbeRequest | GitCloneRequest,
     ) -> RawResult:
-        """Exercise an admitted read-only operation through the test-only seam.
+        """Exercise an admitted operation through the test-only seam.
 
-        Local Git readback deliberately stops after validating and building its
-        fixed request.  Lexical/resolved-path checks cannot prevent symlink
-        replacement between validation and process startup.  Transport remains
-        unavailable until a separately reviewed production transport provides
-        an inode-bound, no-follow working-directory capability.
+        Local Git readback and clone deliberately stop after validating and
+        building their fixed request.  Lexical/resolved-path checks cannot
+        prevent symlink replacement between validation and process startup.
+        Transport remains unavailable until a separately reviewed production
+        transport provides an inode-bound, no-follow working-directory
+        capability.
         """
-        if type(operation) is not LiveOperation:
-            raise LiveExecutorError("unknown live operation")
-
-        if operation is LiveOperation.GIT_REMOTE_PREFLIGHT:
-            if type(parameters) is not GitRemotePreflightRequest:
-                raise LiveExecutorError("live operation received the wrong request type")
-            argv, cwd = _remote_argv(parameters)
-        elif operation is LiveOperation.LOCAL_GIT_READBACK:
-            if type(parameters) is not LocalGitReadbackRequest:
-                raise LiveExecutorError("live operation received the wrong request type")
-            # Keep the hard-coded construction seam testable, but do not hand a
-            # lexical path to any transport: validation cannot close the TOCTOU.
-            _local_git_argv(parameters, self._approved_home)
+        if operation is LiveOperation.LOCAL_GIT_READBACK or operation is LiveOperation.GIT_CLONE or operation is LiveOperation.GIT_REMOTE_READBACK:
+            # Build and validate the exact argv, but do not hand it to the test
+            # transport: an in-memory transport cannot perform a real clone or a
+            # safe local readback, and a lexical path cannot close the TOCTOU.
+            _build_invocation(operation, parameters, self._approved_home)
             raise LiveExecutorError(
-                "local Git readback requires an inode-bound no-follow cwd capability "
-                "and is intentionally unavailable"
+                f"{operation.value} requires the production transport and is intentionally unavailable"
             )
-        elif operation is LiveOperation.CENTRAL_DOLT_PROBE:
-            if type(parameters) is not CentralDoltProbeRequest:
-                raise LiveExecutorError("live operation received the wrong request type")
-            argv, cwd = _dolt_argv(parameters)
-        else:  # pragma: no cover - guarded by exact enum admission above
-            raise LiveExecutorError("unknown live operation")
-
-        invocation = _TransportInvocation(
-            operation=operation,
-            argv=argv,
-            cwd=cwd,
-            env=_minimal_environment(_FIXED_ENVIRONMENT, program=argv[0]),
-            timeout_seconds=TIMEOUT_SECONDS,
-            shell=False,
-        )
-        _validate_built_invocation(invocation)
+        invocation = _build_invocation(operation, parameters, self._approved_home)
         result = self._transport.invoke_for_test(invocation)
         if type(result) is not RawResult:
             raise LiveExecutorError("test transport must return the exact raw result type")
@@ -407,3 +474,97 @@ class ControlledLiveExecutor:
             stdout=_redact_and_bound(result.stdout),
             stderr=_redact_and_bound(result.stderr),
         )
+
+
+class _ProductionTransport(Protocol):
+    """The production transport seam: a bounded, re-validating subprocess runner."""
+
+    def invoke(self, request: _TransportInvocation) -> RawResult: ...
+
+
+class ProductionLiveExecutor:
+    """Map closed operations to argv and run them through the production transport.
+
+    Construction is capability-gated: only the internal factory in
+    ``production_transport.py`` holds the transport token, and this executor
+    admits only the exact production transport type. Every invocation is
+    re-validated by the transport before spawn.
+    """
+
+    def __init__(self, *, transport: _ProductionTransport, approved_home: Path) -> None:
+        if not isinstance(approved_home, Path) or not approved_home.is_absolute():
+            raise LiveExecutorError("approved home must be an absolute path")
+        if ".." in approved_home.parts:
+            raise LiveExecutorError("approved home path traversal is forbidden")
+        # Admit only the exact production transport (verified by its unforgeable
+        # marker; the closure-held factory is the only constructor).
+        if getattr(transport, "_is_production_transport", False) is not True:
+            raise LiveExecutorError("production executor requires the production transport")
+        self._transport = transport
+        self._approved_home = approved_home
+
+    def execute(
+        self,
+        operation: LiveOperation,
+        parameters: GitRemotePreflightRequest | LocalGitReadbackRequest | CentralDoltProbeRequest | GitCloneRequest,
+    ) -> RawResult:
+        invocation = _build_invocation(operation, parameters, self._approved_home)
+        result = self._transport.invoke(invocation)
+        if type(result) is not RawResult:
+            raise LiveExecutorError("production transport must return the exact raw result type")
+        if (
+            isinstance(result.returncode, bool)
+            or not isinstance(result.returncode, int)
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+        ):
+            raise LiveExecutorError("production transport returned invalid raw result fields")
+        return RawResult(
+            returncode=result.returncode,
+            stdout=_redact_and_bound(result.stdout),
+            stderr=_redact_and_bound(result.stderr),
+        )
+
+
+def _build_invocation(
+    operation: LiveOperation,
+    parameters: GitRemotePreflightRequest | LocalGitReadbackRequest | CentralDoltProbeRequest | GitCloneRequest,
+    approved_home: Path,
+) -> _TransportInvocation:
+    """Build and validate the exact argv for an admitted operation."""
+    if type(operation) is not LiveOperation:
+        raise LiveExecutorError("unknown live operation")
+
+    if operation is LiveOperation.GIT_REMOTE_PREFLIGHT:
+        if type(parameters) is not GitRemotePreflightRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _remote_argv(parameters)
+    elif operation is LiveOperation.LOCAL_GIT_READBACK:
+        if type(parameters) is not LocalGitReadbackRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _local_git_argv(parameters, approved_home)
+    elif operation is LiveOperation.CENTRAL_DOLT_PROBE:
+        if type(parameters) is not CentralDoltProbeRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _dolt_argv(parameters)
+    elif operation is LiveOperation.GIT_CLONE:
+        if type(parameters) is not GitCloneRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_clone_argv(parameters)
+    elif operation is LiveOperation.GIT_REMOTE_READBACK:
+        if type(parameters) is not GitRemoteReadbackRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_remote_readback_argv(parameters)
+    else:  # pragma: no cover - guarded by exact enum admission above
+        raise LiveExecutorError("unknown live operation")
+
+    invocation = _TransportInvocation(
+        operation=operation,
+        argv=argv,
+        cwd=cwd,
+        env=_minimal_environment(_FIXED_ENVIRONMENT, program=argv[0]),
+        timeout_seconds=TIMEOUT_SECONDS,
+        shell=False,
+    )
+    _validate_built_invocation(invocation)
+    return invocation

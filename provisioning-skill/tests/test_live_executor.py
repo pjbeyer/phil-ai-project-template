@@ -202,7 +202,7 @@ class ControlledLiveExecutorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             LiveExecutorError,
-            "inode-bound.*intentionally unavailable",
+            "local-git-readback requires the production transport and is intentionally unavailable",
         ):
             executor.execute(
                 LiveOperation.LOCAL_GIT_READBACK,
@@ -557,8 +557,131 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.GIT_REMOTE_PREFLIGHT,
                 LiveOperation.LOCAL_GIT_READBACK,
                 LiveOperation.CENTRAL_DOLT_PROBE,
+                LiveOperation.GIT_CLONE,
+                LiveOperation.GIT_REMOTE_READBACK,
             },
         )
+
+    # -- Slice B: GIT_CLONE ------------------------------------------------
+
+    def test_git_clone_builds_exact_credential_free_argv(self) -> None:
+        from scripts.live_executor import GitCloneRequest
+
+        argv, cwd = live_executor._git_clone_argv(
+            GitCloneRequest(
+                "https://github.com/pjbeyer/demo.git",
+                Path("/tmp/synthetic-home/Projects/pjbeyer/demo"),
+            )
+        )
+        self.assertEqual(
+            argv,
+            (
+                "git", "clone", "--origin", "origin", "--no-tags",
+                "https://github.com/pjbeyer/demo.git",
+                "/tmp/synthetic-home/Projects/pjbeyer/demo",
+            ),
+        )
+        self.assertIsNone(cwd)
+
+    def test_git_clone_rejects_unsafe_origin_and_destination(self) -> None:
+        from scripts.live_executor import GitCloneRequest
+
+        rejected = (
+            GitCloneRequest("https://x@github.com/pjbeyer/demo.git", Path("/tmp/a/demo")),
+            GitCloneRequest("https://github.com/other/demo.git", Path("/tmp/a/demo")),
+            GitCloneRequest("https://github.com/pjbeyer/demo.git", Path("relative/demo")),
+            GitCloneRequest("https://github.com/pjbeyer/demo.git", Path("/tmp/a/../demo")),
+            GitCloneRequest("https://github.com/pjbeyer/demo.git --force", Path("/tmp/a/demo")),
+            GitCloneRequest("https://github.com/pjbeyer/github_pat_x.git", Path("/tmp/a/demo")),
+        )
+        for request in rejected:
+            with self.subTest(request=request), self.assertRaises(LiveExecutorError):
+                live_executor._git_clone_argv(request)
+
+    def test_git_clone_is_fail_closed_under_test_transport(self) -> None:
+        from scripts.live_executor import GitCloneRequest
+
+        with self.assertRaisesRegex(LiveExecutorError, "intentionally unavailable"):
+            self.executor.execute(
+                LiveOperation.GIT_CLONE,
+                GitCloneRequest(
+                    "https://github.com/pjbeyer/demo.git",
+                    Path("/tmp/synthetic-home/Projects/pjbeyer/demo"),
+                ),
+            )
+        self.assertEqual(self.transport.calls, [])
+
+    def test_git_clone_requires_exact_typed_request(self) -> None:
+        with self.assertRaisesRegex(LiveExecutorError, "request type"):
+            self.executor.execute(LiveOperation.GIT_CLONE, object())  # type: ignore[arg-type]
+        self.assertEqual(self.transport.calls, [])
+
+    def test_git_remote_readback_builds_exact_argv_and_is_fail_closed(self) -> None:
+        from scripts.live_executor import GitRemoteReadbackRequest
+
+        path = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        argv, cwd = live_executor._git_remote_readback_argv(
+            GitRemoteReadbackRequest(path)
+        )
+        self.assertEqual(
+            argv,
+            (
+                "git", "--no-optional-locks", "-c", "core.fsmonitor=false",
+                "-C", str(path), "remote", "get-url", "origin",
+            ),
+        )
+        self.assertEqual(cwd, path)
+
+        with self.assertRaisesRegex(LiveExecutorError, "intentionally unavailable"):
+            self.executor.execute(
+                LiveOperation.GIT_REMOTE_READBACK,
+                GitRemoteReadbackRequest(path),
+            )
+        self.assertEqual(self.transport.calls, [])
+
+    def test_git_remote_readback_rejects_unsafe_path(self) -> None:
+        from scripts.live_executor import GitRemoteReadbackRequest
+
+        for path in (Path("relative/demo"), Path("/tmp/a/../demo")):
+            with self.subTest(path=path), self.assertRaises(LiveExecutorError):
+                live_executor._git_remote_readback_argv(GitRemoteReadbackRequest(path))
+
+    def test_production_executor_rejects_non_production_transport(self) -> None:
+        from scripts.live_executor import ProductionLiveExecutor
+
+        class FakeTransport:
+            def invoke(self, request: object) -> RawResult:
+                del request
+                return RawResult(0, "", "")
+
+        with self.assertRaisesRegex(LiveExecutorError, "production transport"):
+            ProductionLiveExecutor(transport=FakeTransport(), approved_home=self.home)
+
+    def test_production_executor_runs_through_invoke_seam(self) -> None:
+        from scripts.live_executor import (
+            CentralDoltProbeRequest,
+            ProductionLiveExecutor,
+        )
+
+        class RecordingProdTransport:
+            _is_production_transport = True
+
+            def __init__(self) -> None:
+                self.calls: list[object] = []
+
+            def invoke(self, request: object) -> RawResult:
+                self.calls.append(request)
+                return RawResult(0, "ok", "")
+
+        transport = RecordingProdTransport()
+        executor = ProductionLiveExecutor(transport=transport, approved_home=self.home)
+        result = executor.execute(
+            LiveOperation.CENTRAL_DOLT_PROBE,
+            CentralDoltProbeRequest(),
+        )
+        self.assertEqual(result, RawResult(0, "ok", ""))
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(transport.calls[0].operation, LiveOperation.CENTRAL_DOLT_PROBE)  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":
