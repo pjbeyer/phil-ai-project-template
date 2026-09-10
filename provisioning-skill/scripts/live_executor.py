@@ -36,6 +36,8 @@ class LiveOperation(Enum):
     CENTRAL_DOLT_PROBE = "central-dolt-probe"
     GIT_CLONE = "git-clone"
     GIT_REMOTE_READBACK = "git-remote-readback"
+    GIT_TEMPLATE_REVISION = "git-template-revision"
+    COPIER_RENDER = "copier-render"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +75,30 @@ class GitRemoteReadbackRequest:
     """Read the remote origin URL of a local checkout for identity verification."""
 
     path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitTemplateRevisionRequest:
+    """Read the resolved commit of the approved template tag in a local checkout."""
+
+    path: Path
+    tag: str
+
+
+@dataclass(frozen=True, slots=True)
+class CopierRenderRequest:
+    """Render the approved immutable template revision into the destination.
+
+    ``template_source`` is the local checkout of the allowlisted template;
+    ``destination`` is the cloned (empty) primary checkout. Answers are the
+    non-secret, pre-validated render values; the tag is the immutable revision
+    to render. No credential or private path may appear in any answer.
+    """
+
+    template_source: Path
+    destination: Path
+    tag: str
+    answers: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +183,18 @@ _FORBIDDEN_TOKENS = frozenset(
 )
 _SHELL_METACHARACTERS = frozenset(";&|`$><\n\r")
 _BEADS_ENV_KEYS = frozenset({"BEADS_DOLT_PORT", "BEADS_DOLT_DATABASE"})
+# Floating refs must never be rendered or resolved as an immutable revision.
+_FLOATING_REFS = frozenset(
+    {
+        "main",
+        "origin/main",
+        "refs/remotes/origin/main",
+        "refs/heads/main",
+        "heads/main",
+        "HEAD",
+        ":current:",
+    }
+)
 
 TIMEOUT_SECONDS = 15
 MAX_OUTPUT_CHARS = 16_384
@@ -353,6 +391,63 @@ def _git_remote_readback_argv(request: GitRemoteReadbackRequest) -> tuple[tuple[
     ), request.path
 
 
+def _git_template_revision_argv(request: GitTemplateRevisionRequest) -> tuple[tuple[str, ...], Path]:
+    """Resolve the approved template tag to its immutable commit in the checkout."""
+    if not isinstance(request.path, Path) or not request.path.is_absolute():
+        raise LiveExecutorError("template revision path must be absolute")
+    if ".." in request.path.parts:
+        raise LiveExecutorError("template revision path traversal is forbidden")
+    path_text = str(request.path)
+    _reject_secret_or_unsafe_text(path_text, "template revision path")
+    _reject_secret_or_unsafe_text(request.tag, "template revision tag")
+    # The tag must be an explicit version-shaped non-floating ref; reject any
+    # shell metacharacter or floating ref before it reaches git.
+    if request.tag in _FLOATING_REFS:
+        raise LiveExecutorError("template revision tag must be explicit and non-floating")
+    return (
+        "git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        path_text,
+        "rev-parse",
+        f"{request.tag}^{{commit}}",
+    ), request.path
+
+
+def _copier_render_argv(request: CopierRenderRequest) -> tuple[tuple[str, ...], Path]:
+    """Build the exact Copier render argv from pre-validated non-secret answers."""
+    if not isinstance(request.template_source, Path) or not request.template_source.is_absolute():
+        raise LiveExecutorError("render template source must be absolute")
+    if not isinstance(request.destination, Path) or not request.destination.is_absolute():
+        raise LiveExecutorError("render destination must be absolute")
+    for label, path in (("template source", request.template_source), ("destination", request.destination)):
+        if ".." in path.parts:
+            raise LiveExecutorError(f"render {label} path traversal is forbidden")
+        _reject_secret_or_unsafe_text(str(path), f"render {label} path")
+    _reject_secret_or_unsafe_text(request.tag, "render template tag")
+    if request.tag in _FLOATING_REFS:
+        raise LiveExecutorError("render template tag must be explicit and non-floating")
+    if type(request.answers) is not tuple or not request.answers:
+        raise LiveExecutorError("render answers must be a nonempty tuple")
+    seen: set[str] = set()
+    argv: list[str] = [
+        "copier", "copy", "--defaults", "--skip-tasks", "--vcs-ref", request.tag,
+    ]
+    for key, value in request.answers:
+        if type(key) is not str or type(value) is not str:
+            raise LiveExecutorError("render answers must be plain strings")
+        _reject_secret_or_unsafe_text(key, "render answer key")
+        _reject_secret_or_unsafe_text(value, "render answer value")
+        if key in seen:
+            raise LiveExecutorError("render answer keys must be unique")
+        seen.add(key)
+        argv.extend(("--data", f"{key}={value}"))
+    argv.extend((str(request.template_source), str(request.destination)))
+    return tuple(argv), request.destination
+
+
 def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path | None]:
     del request
     return (
@@ -450,10 +545,16 @@ class ControlledLiveExecutor:
         transport provides an inode-bound, no-follow working-directory
         capability.
         """
-        if operation is LiveOperation.LOCAL_GIT_READBACK or operation is LiveOperation.GIT_CLONE or operation is LiveOperation.GIT_REMOTE_READBACK:
+        if operation in (
+            LiveOperation.LOCAL_GIT_READBACK,
+            LiveOperation.GIT_CLONE,
+            LiveOperation.GIT_REMOTE_READBACK,
+            LiveOperation.GIT_TEMPLATE_REVISION,
+            LiveOperation.COPIER_RENDER,
+        ):
             # Build and validate the exact argv, but do not hand it to the test
-            # transport: an in-memory transport cannot perform a real clone or a
-            # safe local readback, and a lexical path cannot close the TOCTOU.
+            # transport: an in-memory transport cannot perform a real clone/render
+            # or a safe local readback, and a lexical path cannot close the TOCTOU.
             _build_invocation(operation, parameters, self._approved_home)
             raise LiveExecutorError(
                 f"{operation.value} requires the production transport and is intentionally unavailable"
@@ -555,6 +656,14 @@ def _build_invocation(
         if type(parameters) is not GitRemoteReadbackRequest:
             raise LiveExecutorError("live operation received the wrong request type")
         argv, cwd = _git_remote_readback_argv(parameters)
+    elif operation is LiveOperation.GIT_TEMPLATE_REVISION:
+        if type(parameters) is not GitTemplateRevisionRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_template_revision_argv(parameters)
+    elif operation is LiveOperation.COPIER_RENDER:
+        if type(parameters) is not CopierRenderRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _copier_render_argv(parameters)
     else:  # pragma: no cover - guarded by exact enum admission above
         raise LiveExecutorError("unknown live operation")
 

@@ -559,6 +559,8 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.CENTRAL_DOLT_PROBE,
                 LiveOperation.GIT_CLONE,
                 LiveOperation.GIT_REMOTE_READBACK,
+                LiveOperation.GIT_TEMPLATE_REVISION,
+                LiveOperation.COPIER_RENDER,
             },
         )
 
@@ -682,6 +684,91 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         self.assertEqual(result, RawResult(0, "ok", ""))
         self.assertEqual(len(transport.calls), 1)
         self.assertEqual(transport.calls[0].operation, LiveOperation.CENTRAL_DOLT_PROBE)  # type: ignore[attr-defined]
+
+    # -- Slice C: GIT_TEMPLATE_REVISION + COPIER_RENDER --------------------
+
+    def test_git_template_revision_builds_exact_argv_and_is_fail_closed(self) -> None:
+        from scripts.live_executor import GitTemplateRevisionRequest
+
+        path = Path("/tmp/synthetic-home/template")
+        argv, cwd = live_executor._git_template_revision_argv(
+            GitTemplateRevisionRequest(path, "v0.1.3")
+        )
+        self.assertEqual(
+            argv,
+            (
+                "git", "--no-optional-locks", "-c", "core.fsmonitor=false",
+                "-C", str(path), "rev-parse", "v0.1.3^{commit}",
+            ),
+        )
+        self.assertEqual(cwd, path)
+        with self.assertRaisesRegex(LiveExecutorError, "intentionally unavailable"):
+            self.executor.execute(
+                LiveOperation.GIT_TEMPLATE_REVISION,
+                GitTemplateRevisionRequest(path, "v0.1.3"),
+            )
+        self.assertEqual(self.transport.calls, [])
+
+    def test_git_template_revision_rejects_floating_and_unsafe_inputs(self) -> None:
+        from scripts.live_executor import GitTemplateRevisionRequest
+
+        for tag, path in (
+            ("HEAD", Path("/tmp/a/template")),
+            ("main", Path("/tmp/a/template")),
+            ("v0.1.3;stop", Path("/tmp/a/template")),
+            ("v0.1.3", Path("relative/template")),
+            ("v0.1.3", Path("/tmp/a/../template")),
+        ):
+            with self.subTest(tag=tag, path=path), self.assertRaises(LiveExecutorError):
+                live_executor._git_template_revision_argv(GitTemplateRevisionRequest(path, tag))
+
+    def test_copier_render_builds_exact_argv_from_validated_answers(self) -> None:
+        from scripts.live_executor import CopierRenderRequest
+
+        template = Path("/tmp/synthetic-home/template")
+        destination = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        answers = (
+            ("repository_owner", "pjbeyer"),
+            ("repository_name", "demo"),
+            ("project_kind", "generic"),
+        )
+        argv, cwd = live_executor._copier_render_argv(
+            CopierRenderRequest(template, destination, "v0.1.3", answers)
+        )
+        self.assertEqual(
+            argv,
+            (
+                "copier", "copy", "--defaults", "--skip-tasks", "--vcs-ref", "v0.1.3",
+                "--data", "repository_owner=pjbeyer",
+                "--data", "repository_name=demo",
+                "--data", "project_kind=generic",
+                str(template), str(destination),
+            ),
+        )
+        self.assertEqual(cwd, destination)
+        with self.assertRaisesRegex(LiveExecutorError, "intentionally unavailable"):
+            self.executor.execute(
+                LiveOperation.COPIER_RENDER,
+                CopierRenderRequest(template, destination, "v0.1.3", answers),
+            )
+        self.assertEqual(self.transport.calls, [])
+
+    def test_copier_render_rejects_unsafe_answers_paths_and_tags(self) -> None:
+        from scripts.live_executor import CopierRenderRequest
+
+        template = Path("/tmp/a/template")
+        destination = Path("/tmp/a/demo")
+        rejected = (
+            CopierRenderRequest(template, destination, "HEAD", (("k", "v"),)),
+            CopierRenderRequest(template, destination, "v0.1.3", (("token=x", "v"),)),
+            CopierRenderRequest(template, destination, "v0.1.3", (("k", "v"), ("k", "v2"))),
+            CopierRenderRequest(template, destination, "v0.1.3", ()),
+            CopierRenderRequest(Path("relative"), destination, "v0.1.3", (("k", "v"),)),
+            CopierRenderRequest(template, Path("relative"), "v0.1.3", (("k", "v"),)),
+        )
+        for request in rejected:
+            with self.subTest(request=request), self.assertRaises(LiveExecutorError):
+                live_executor._copier_render_argv(request)
 
 
 if __name__ == "__main__":

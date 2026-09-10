@@ -307,6 +307,34 @@ class ImmutableConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ConfigurationError):
                     _approved_project_home()
 
+    def test_approved_template_source_resolution_prefers_env_then_config(self) -> None:
+        from scripts.models import _approved_template_source
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(ConfigurationError):
+                _approved_template_source()
+
+        # Env var supplies the checkout path.
+        with patch.dict(
+            "os.environ", {"PROVISIONING_TEMPLATE_SOURCE": f"{_SYNTHETIC_HOME}/template"}, clear=True
+        ):
+            self.assertEqual(
+                _approved_template_source(), Path(f"{_SYNTHETIC_HOME}/template")
+            )
+
+        # Config file alone supplies it via the dedicated key.
+        with patch.dict("os.environ", {"XDG_CONFIG_HOME": "/tmp/pjb-xdg"}, clear=True), patch.object(
+            Path, "home", return_value=Path(_SYNTHETIC_HOME)
+        ):
+            cfg_dir = Path("/tmp/pjb-xdg/provisioning")
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            (cfg_dir / "config.json").write_text(
+                json.dumps({"approved_template_source": f"{_SYNTHETIC_HOME}/template"}), encoding="utf-8"
+            )
+            self.assertEqual(
+                _approved_template_source(), Path(f"{_SYNTHETIC_HOME}/template")
+            )
+
     def test_config_rejects_secret_patterns_pointers_tokenized_urls_and_private_paths(self) -> None:
         rejected_sources = (
             "op://SyntheticVault/SyntheticItem/SyntheticField",

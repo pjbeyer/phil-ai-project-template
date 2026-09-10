@@ -91,6 +91,11 @@ _FLOATING_REFS = frozenset(
 # closed rather than falling back to a workstation path.
 _APPROVED_PROJECT_HOME_ENV = "PROVISIONING_APPROVED_HOME"
 _APPROVED_PROJECT_HOME_CONFIG_KEY = "approved_project_home"
+# The template checkout is a second runtime-derived root (FR-027/NFR-007): the
+# skill never hard-codes the operator's template repository path. It resolves
+# from an env var or the same approved config file, fail-closed if unset.
+_APPROVED_TEMPLATE_SOURCE_ENV = "PROVISIONING_TEMPLATE_SOURCE"
+_APPROVED_TEMPLATE_SOURCE_CONFIG_KEY = "approved_template_source"
 
 
 def _approved_project_home_config_path() -> Path:
@@ -99,7 +104,7 @@ def _approved_project_home_config_path() -> Path:
     return base / "provisioning" / "config.json"
 
 
-def _approved_project_home_from_file(path: Path) -> str | None:
+def _approved_project_home_from_file(path: Path, *, key: str = _APPROVED_PROJECT_HOME_CONFIG_KEY) -> str | None:
     try:
         size = path.stat().st_size
     except OSError:
@@ -116,7 +121,7 @@ def _approved_project_home_from_file(path: Path) -> str | None:
         raise ConfigurationError("approved project home config file is not valid JSON") from error
     if not isinstance(data, dict):
         raise ConfigurationError("approved project home config file must be a JSON object")
-    value = data.get(_APPROVED_PROJECT_HOME_CONFIG_KEY)
+    value = data.get(key)
     if value is None:
         return None
     if type(value) is not str:
@@ -140,6 +145,32 @@ def _approved_project_home() -> Path:
     except ConfigurationError as error:
         raise ConfigurationError(
             "approved project home must be an exact canonical absolute path"
+        ) from error
+
+
+def _approved_template_source() -> Path:
+    """Resolve the operator's template checkout path, fail-closed if unset.
+
+    The template source identity is allowlisted separately; this only resolves
+    the local checkout directory from which the immutable tag/commit is read and
+    rendered. It is runtime-derived (env var or the approved config file), never
+    hard-coded, and must be an exact canonical absolute path.
+    """
+    raw = os.environ.get(_APPROVED_TEMPLATE_SOURCE_ENV)
+    if raw is None:
+        raw = _approved_project_home_from_file(_approved_project_home_config_path(), key=_APPROVED_TEMPLATE_SOURCE_CONFIG_KEY)
+    if raw is None:
+        raise ConfigurationError(
+            "approved template source is not configured "
+            "(set PROVISIONING_TEMPLATE_SOURCE or "
+            "approved_template_source in the provisioning config file)"
+        )
+    candidate = Path(os.path.expanduser(raw))
+    try:
+        return _canonical_absolute_path(candidate, "approved template source")
+    except ConfigurationError as error:
+        raise ConfigurationError(
+            "approved template source must be an exact canonical absolute path"
         ) from error
 
 

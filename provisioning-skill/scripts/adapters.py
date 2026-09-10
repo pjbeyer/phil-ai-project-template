@@ -29,8 +29,10 @@ from .closeout import scan_staged_content, validate_commit_message
 from .controlled_fixture import ControlledFixtureError, ControlledFixtureSession, ControlledMutationTarget
 from .live_executor import (
     ControlledLiveExecutor as _ControlledLiveExecutor,
+    CopierRenderRequest,
     GitCloneRequest,
     GitRemoteReadbackRequest,
+    GitTemplateRevisionRequest,
     LiveOperation,
 )
 from .production_transport import make_production_executor
@@ -1850,35 +1852,43 @@ class LiveAdapter:
     def _g03(self) -> None:
         request, origin, destination, config = self._context()
         self._repository_readback("g03.repository.pre-render", empty=True)
-        revision = self._execute(
-            "g03.template.revision",
-            ["git", "-C", str(config.template_source), "rev-parse", f"{config.template_tag}^{{commit}}"],
-            cwd=config.template_source,
+        # Resolve the approved template tag to its immutable commit in the
+        # runtime-derived checkout (never a hard-coded path).
+        from .models import _approved_template_source
+
+        template_source = _approved_template_source()
+        executor = self._production_executor()
+        revision = executor.execute(
+            LiveOperation.GIT_TEMPLATE_REVISION,
+            GitTemplateRevisionRequest(template_source, config.template_tag),
         )
-        self._require(revision.data, "revision", config.template_commit, "g03.template.revision")
-        argv = [
-            "copier", "copy", "--defaults", "--skip-tasks", "--vcs-ref", config.template_tag,
-            "--data", f"repository_owner={origin.owner}",
-            "--data", f"repository_name={origin.repository}",
-            "--data", f"project_description={request.description}",
-            "--data", f"project_kind={request.project_kind}",
-            "--data", f"template_revision={config.template_tag}",
-            str(config.template_source), str(destination),
-        ]
-        rendered = self._execute("g03.render", argv, cwd=destination, mutating=True)
-        for key, expected in (
-            ("template_source", str(config.template_source)),
-            ("template_tag", config.template_tag),
-            ("template_commit", config.template_commit),
+        if revision.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", revision.stderr or revision.stdout or "no diagnostic")
+            raise AdapterError(f"g03.template.revision failed with exit {revision.returncode}: {detail[:500]}")
+        resolved_commit = revision.stdout.strip()
+        if resolved_commit != config.resolved_template_commit:
+            raise AdapterError("template tag does not resolve to the approved immutable commit")
+        answers = (
             ("repository_owner", origin.owner),
             ("repository_name", origin.repository),
+            ("project_description", request.description),
             ("project_kind", request.project_kind),
-            ("render_valid", True),
-            ("forbidden_paths", []),
-        ):
-            self._require(rendered.data, key, expected, "g03.render")
+            ("template_revision", config.template_tag),
+        )
+        rendered = executor.execute(
+            LiveOperation.COPIER_RENDER,
+            CopierRenderRequest(template_source, destination, config.template_tag, answers),
+        )
+        if rendered.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", rendered.stderr or rendered.stdout or "no diagnostic")
+            raise AdapterError(f"g03.render failed with exit {rendered.returncode}: {detail[:500]}")
+        # Render readback: the rendered checkout must exist and the immutable
+        # revision must be recorded (FR-008/FR-009). The full matrix readback is
+        # performed by the render validator in the closeout gate (G10).
+        if not destination.is_dir():
+            raise AdapterError("render did not produce the destination checkout")
         self._evidence[Gate.RENDER] = (
-            f"approved Copier {config.template_tag}@{config.template_commit} rendered and matrix read back"
+            f"approved Copier {config.template_tag}@{config.resolved_template_commit} rendered and revision read back"
         )
 
     def _g04(self) -> None:
