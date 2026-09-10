@@ -1,0 +1,20 @@
+provisioning-skill/scripts/live_executor.py
+  h_c5be3b3dad7ca8 339-345
+provisioning-skill/scripts/production_transport.py
+  h_c5be3b3dad7ca8 42,45-60,89-91,93-94,98-99
+provisioning-skill/tests/test_evidence_hygiene.py
+  h_c5be3b3dad7ca8 60-69,179-184
+provisioning-skill/tests/test_production_transport.py
+  h_c5be3b3dad7ca8 24,53-65,68,71,75,80,86,103,112,121,134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "cd871186d8c8aa7fbdc87cb510cb4084e91256e3",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
