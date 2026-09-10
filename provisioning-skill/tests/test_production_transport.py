@@ -21,6 +21,7 @@ from scripts.live_executor import (
     RawResult,
     _TransportInvocation,
 )
+from scripts import production_transport as pt
 from scripts.production_transport import ProductionTransport
 
 
@@ -49,30 +50,40 @@ class ProductionTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(LiveExecutorError, "private factory"):
             ProductionTransport()  # type: ignore[call-arg]
 
-    def test_subclass_factory_is_rejected(self) -> None:
-        class Subclass(ProductionTransport):
-            pass
+    def test_capability_is_not_importable(self) -> None:
+        # The capability token must not be a module attribute (forgeable).
+        self.assertFalse(hasattr(pt, "_PRODUCTION_TRANSPORT_CAPABILITY"))
+        self.assertFalse(hasattr(pt, "_capability"))
+
+    def test_subclass_with_forged_token_is_rejected(self) -> None:
+        # Deterministic regression for review Finding 1: even if a caller
+        # fabricates a token object, the exact-type check must reject subclasses.
+        forged = pt._ProductionTransportCapability()
+
+        class Evil(ProductionTransport):
+            def __init__(self) -> None:
+                super().__init__(_capability=forged)
 
         with self.assertRaisesRegex(LiveExecutorError, "subclasses"):
-            Subclass._for_authorized_executor()
+            Evil()
 
     def test_factory_returns_exact_type(self) -> None:
-        transport = ProductionTransport._for_authorized_executor()
+        transport = pt._for_authorized_executor()
         self.assertIs(type(transport), ProductionTransport)
 
     def test_rejects_wrong_invocation_type(self) -> None:
-        transport = ProductionTransport._for_authorized_executor()
+        transport = pt._for_authorized_executor()
         with self.assertRaisesRegex(LiveExecutorError, "exact invocation type"):
             transport.invoke(object())  # type: ignore[arg-type]
 
     def test_rejects_shell_invocation(self) -> None:
-        transport = ProductionTransport._for_authorized_executor()
+        transport = pt._for_authorized_executor()
         inv = _invocation(shell=True)
         with self.assertRaisesRegex(LiveExecutorError, "non-shell"):
             transport.invoke(inv)
 
     def test_runs_non_shell_and_redacts_output(self) -> None:
-        transport = ProductionTransport._for_authorized_executor()
+        transport = pt._for_authorized_executor()
         inv = _invocation()
         with patch(
             "scripts.production_transport.subprocess.run",
@@ -89,7 +100,7 @@ class ProductionTransportTests(unittest.TestCase):
     def test_timeout_raises_controlled_error(self) -> None:
         import subprocess
 
-        transport = ProductionTransport._for_authorized_executor()
+        transport = pt._for_authorized_executor()
         with patch(
             "scripts.production_transport.subprocess.run",
             side_effect=subprocess.TimeoutExpired("dolt", 15),
@@ -98,7 +109,7 @@ class ProductionTransportTests(unittest.TestCase):
                 transport.invoke(_invocation())
 
     def test_start_failure_raises_controlled_error(self) -> None:
-        transport = ProductionTransport._for_authorized_executor()
+        transport = pt._for_authorized_executor()
         with patch(
             "scripts.production_transport.subprocess.run",
             side_effect=OSError("no such binary"),
@@ -107,7 +118,7 @@ class ProductionTransportTests(unittest.TestCase):
                 transport.invoke(_invocation())
 
     def test_cwd_is_opened_no_follow_and_pinned(self) -> None:
-        transport = ProductionTransport._for_authorized_executor()
+        transport = pt._for_authorized_executor()
         with tempfile.TemporaryDirectory() as tmp:
             cwd = Path(tmp)
             inv = _invocation(cwd=cwd)
@@ -120,7 +131,7 @@ class ProductionTransportTests(unittest.TestCase):
             self.assertIsNotNone(run.call_args.kwargs.get("preexec_fn"))
 
     def test_cwd_open_failure_raises_controlled_error(self) -> None:
-        transport = ProductionTransport._for_authorized_executor()
+        transport = pt._for_authorized_executor()
         inv = _invocation(cwd=Path("/nonexistent/does/not/exist"))
         with self.assertRaisesRegex(LiveExecutorError, "cwd open failed"):
             transport.invoke(inv)

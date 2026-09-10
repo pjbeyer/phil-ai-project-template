@@ -57,6 +57,16 @@ _FORBIDDEN_IMPORTS = (
 # remain forbidden.
 _SUBPROCESS_ALLOWED_MODULE = "production_transport.py"
 
+# The transport module itself must also never be imported by any other shipped
+# script (it is the only reachable subprocess surface). Its name and public
+# symbols are forbidden imports everywhere except within the module itself.
+_TRANSPORT_IMPORT_PATTERNS = (
+    "production_transport",
+    "ProductionTransport",
+    "_for_authorized_executor",
+    "_ProductionTransportCapability",
+)
+
 
 def _source_texts() -> list[Path]:
     suffixes = {".py"}
@@ -166,6 +176,12 @@ class EvidenceHygieneTests(unittest.TestCase):
                         if forbidden.startswith(("import subprocess", "from subprocess")) and path.name == _SUBPROCESS_ALLOWED_MODULE:
                             continue
                         findings.append(f"{path.name}:{lineno}: {forbidden}")
+                # The transport module and its symbols must never be imported by
+                # any other shipped script (mechanical gate for review Finding 2).
+                if path.name != _SUBPROCESS_ALLOWED_MODULE:
+                    for pattern in _TRANSPORT_IMPORT_PATTERNS:
+                        if pattern in line:
+                            findings.append(f"{path.name}:{lineno}: imports {pattern}")
         self.assertEqual(
             findings, [], "forbidden transport/code-exec imports present:\n" + "\n".join(findings)
         )

@@ -336,6 +336,13 @@ class ControlledLiveExecutor:
             raise LiveExecutorError("approved home must be an absolute path")
         if ".." in approved_home.parts:
             raise LiveExecutorError("approved home path traversal is forbidden")
+        # The controlled executor drives only the test transport. A production
+        # transport exposes `invoke`, not `invoke_for_test`; fail fast with a
+        # typed error rather than an AttributeError at execute() time.
+        if not hasattr(transport, "invoke_for_test"):
+            raise LiveExecutorError(
+                "controlled executor requires a test transport (invoke_for_test)"
+            )
         self._transport = transport
         self._approved_home = approved_home
 

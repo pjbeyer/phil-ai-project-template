@@ -39,10 +39,25 @@ from .live_executor import (
 
 
 class _ProductionTransportCapability:
-    """Private construction token; only the internal factory holds it."""
+    """Private construction token; only the internal factory closure holds it."""
 
 
-_PRODUCTION_TRANSPORT_CAPABILITY = _ProductionTransportCapability()
+def _make_authorized_factory():
+    """Return a factory closure holding the sole capability instance.
+
+    The token is function-local so it is not importable: no module attribute
+    exposes it, so it cannot be forged by importing the module. The closure is
+    the only code path that can construct an admitted ``ProductionTransport``.
+    """
+    _capability = _ProductionTransportCapability()
+
+    def _factory() -> "ProductionTransport":
+        return ProductionTransport(_capability=_capability)
+
+    return _factory
+
+
+_for_authorized_executor = _make_authorized_factory()
 
 
 def _open_directory_fd(path: Path) -> int:
@@ -71,16 +86,17 @@ class ProductionTransport:
     """
 
     def __init__(self, *, _capability: _ProductionTransportCapability | None = None) -> None:
-        if _capability is not _PRODUCTION_TRANSPORT_CAPABILITY:
+        # The capability is held only by the factory closure; it is not
+        # importable. Any caller without the closure-held token is rejected.
+        if _capability is None:
             raise LiveExecutorError("production transport requires the private factory")
-
-    @classmethod
-    def _for_authorized_executor(cls) -> "ProductionTransport":
-        if cls is not ProductionTransport:
+        # Defense in depth: even with a forged token, the exact type is enforced.
+        if type(self) is not ProductionTransport:
             raise LiveExecutorError("production transport subclasses are not admitted")
-        return cls(_capability=_PRODUCTION_TRANSPORT_CAPABILITY)
 
     def invoke(self, request: _TransportInvocation) -> RawResult:
+        if type(self) is not ProductionTransport:
+            raise LiveExecutorError("production transport subclasses are not admitted")
         if type(request) is not _TransportInvocation:
             raise LiveExecutorError("production transport requires the exact invocation type")
         # Defense in depth: re-run the executor's validation before any spawn.
