@@ -1,0 +1,18 @@
+provisioning-skill/scripts/production_transport.py
+  h_c5be3b3dad7ca8 1-125
+provisioning-skill/tests/test_evidence_hygiene.py
+  h_c5be3b3dad7ca8 37-41,56-59,164-167
+provisioning-skill/tests/test_production_transport.py
+  h_c5be3b3dad7ca8 1-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "89ddc414a23257bb816267ab74d2bf94d4f0913f",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
