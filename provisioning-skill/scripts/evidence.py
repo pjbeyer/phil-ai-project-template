@@ -380,7 +380,15 @@ def persist(
     otherwise this function opens the supplied root with no-follow semantics.
     """
     root = root or evidence_root()
-    payload = redact(json.dumps(evidence.serializable(), sort_keys=True, indent=2)) + "\n"
+    serialized = json.dumps(evidence.serializable(), sort_keys=True, indent=2)
+    # Reject rather than silently rewrite: redacting would make evidence
+    # ambiguous (whether a "[REDACTED]" token was original or sanitized).
+    # ProvisioningEvidence construction does not validate every field, so
+    # persist() is the durable boundary and fails closed on unsafe material,
+    # mirroring live_evidence_to_json and RenderProvenance.__post_init__.
+    if redact(serialized) != serialized:
+        raise ConfigurationError("evidence contains unsafe material and was not persisted")
+    payload = serialized + "\n"
     destination_name = f"{evidence.request_fingerprint}-{evidence.run_id}.json"
     opened_here = False
     if directory_fd is None:

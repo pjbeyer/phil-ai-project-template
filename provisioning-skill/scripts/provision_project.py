@@ -1085,7 +1085,12 @@ class Provisioner:
         evidence = ProvisioningEvidence(
             run_id=uuid.uuid4().hex,
             request_fingerprint=fingerprint,
-            destination=str(destination),
+            # The routed destination is a private absolute path; evidence must
+            # carry no private path (NFR-007/FR-027). Identity and routing are
+            # already bound by request_fingerprint; persist() rejects any
+            # private-path evidence, so record the redacted marker here like the
+            # controlled fixtures do.
+            destination="[REDACTED]",
             repository_identity=origin.identity,
             state="blocked-preflight",
             template_revision=self.adapter.template_revision,

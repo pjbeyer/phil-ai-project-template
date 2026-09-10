@@ -96,10 +96,11 @@ class EvidenceHygieneTests(unittest.TestCase):
 
     # -- Behavioral: evidence output never leaks secret material ----------
 
-    def test_evidence_persist_redacts_secret_shaped_detail(self) -> None:
-        # The durable evidence-output boundary is persist(): it redacts
-        # secret-shaped material before writing the on-disk ledger. In-memory
-        # serializable() is not a trusted/output boundary and is not redacted.
+    def test_evidence_persist_rejects_secret_shaped_detail(self) -> None:
+        # The durable evidence-output boundary is persist(): it REJECTS
+        # secret-shaped material (fail-closed) rather than silently rewriting
+        # to an ambiguous "[REDACTED]" token — mirroring live_evidence_to_json
+        # and RenderProvenance.__post_init__. (T046 SHOULD-FIX regression.)
         from scripts.evidence import persist
         from scripts.models import Gate, GateResult
 
@@ -113,12 +114,10 @@ class EvidenceHygieneTests(unittest.TestCase):
             simulation=True,
         )
         with tempfile.TemporaryDirectory() as tmp:
-            persisted = persist(evidence, Path(tmp))
-            serialized = persisted.read_text(encoding="utf-8")
-        self.assertNotIn("synthetic-sensitive-value", serialized)
-        self.assertNotIn("token=", serialized)
+            with self.assertRaises(ConfigurationError):
+                persist(evidence, Path(tmp))
 
-    def test_persist_writes_no_secret_shaped_value(self) -> None:
+    def test_persist_rejects_secret_shaped_value(self) -> None:
         from scripts.evidence import persist
         from scripts.models import Gate, GateResult
 
@@ -132,10 +131,8 @@ class EvidenceHygieneTests(unittest.TestCase):
             simulation=True,
         )
         with tempfile.TemporaryDirectory() as tmp:
-            result = persist(evidence, Path(tmp))
-            written = result.read_text(encoding="utf-8")
-            self.assertNotIn("op://", written)
-            self.assertNotIn("canary-item", written)
+            with self.assertRaises(ConfigurationError):
+                persist(evidence, Path(tmp))
 
     def test_redact_catches_userinfo_pointer_and_secret_shapes(self) -> None:
         for unsafe in (
