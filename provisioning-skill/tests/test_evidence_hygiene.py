@@ -34,6 +34,11 @@ _CLI_MAIN = (_SCRIPTS_DIR / "provision_project.py").read_text(encoding="utf-8")
 # Transport/code-exec primitives that must never appear in the shipped skill
 # source. The adapters legitimately *document* the absence of these; matching is
 # therefore done on the import/call surface, not prose.
+#
+# Slice A (pjb-m0ap.3.8) introduces exactly one permitted subprocess module:
+# ``production_transport.py``. It is capability-gated, is the only module that
+# may import ``subprocess``, and is never reachable from the public CLI. Every
+# other script must remain transport-free.
 _FORBIDDEN_IMPORTS = (
     "import subprocess",
     "from subprocess",
@@ -47,6 +52,10 @@ _FORBIDDEN_IMPORTS = (
     "import ctypes",
     "import importlib",
 )
+
+# The single permitted subprocess host (Slice A). subprocess imports elsewhere
+# remain forbidden.
+_SUBPROCESS_ALLOWED_MODULE = "production_transport.py"
 
 
 def _source_texts() -> list[Path]:
@@ -152,6 +161,10 @@ class EvidenceHygieneTests(unittest.TestCase):
             for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
                 for forbidden in _FORBIDDEN_IMPORTS:
                     if forbidden in line:
+                        # subprocess is permitted only in the single gated
+                        # production-transport module (Slice A).
+                        if forbidden.startswith(("import subprocess", "from subprocess")) and path.name == _SUBPROCESS_ALLOWED_MODULE:
+                            continue
                         findings.append(f"{path.name}:{lineno}: {forbidden}")
         self.assertEqual(
             findings, [], "forbidden transport/code-exec imports present:\n" + "\n".join(findings)
