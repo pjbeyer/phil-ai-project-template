@@ -1,0 +1,18 @@
+provisioning-skill/scripts/evidence.py
+  h_c5be3b3dad7ca8 383-391
+provisioning-skill/scripts/provision_project.py
+  h_c5be3b3dad7ca8 1088-1093
+provisioning-skill/tests/test_evidence_hygiene.py
+  h_c5be3b3dad7ca8 99-103,117-118,120,134-135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f06887bcca5cb6fe721fcd27bff8f165d6f110fd",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
