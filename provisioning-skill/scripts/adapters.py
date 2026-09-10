@@ -29,7 +29,14 @@ from .closeout import scan_staged_content, validate_commit_message
 from .controlled_fixture import ControlledFixtureError, ControlledFixtureSession, ControlledMutationTarget
 from .live_executor import (
     ControlledLiveExecutor as _ControlledLiveExecutor,
+    BeadsHooksInstallRequest,
+    BeadsHooksListRequest,
+    BeadsInitRequest,
+    BeadsPrefixReadRequest,
+    BeadsSetupRequest,
     CopierRenderRequest,
+    DoltRemoteAddRequest,
+    DoltRemoteListRequest,
     GitCloneRequest,
     GitRemoteReadbackRequest,
     GitTemplateRevisionRequest,
@@ -1896,23 +1903,27 @@ class LiveAdapter:
         self._repository_readback("g04.repository.pre-init")
         if (destination / ".beads").exists():
             raise AdapterError("existing .beads state forbids Beads initialization")
-        self._execute(
-            "g04.init",
-            [
-                "bd", "init", "--server", "--external", "--server-host", "127.0.0.1",
-                "--server-port", "3307", "--prefix", request.beads_prefix,
-                "--non-interactive", "--role", "maintainer", "--skip-agents", "--skip-hooks",
-            ],
-            cwd=destination,
-            mutating=True,
+        executor = self._production_executor()
+        init = executor.execute(
+            LiveOperation.BEADS_INIT,
+            BeadsInitRequest(destination, request.beads_prefix),
         )
+        if init.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", init.stderr or init.stdout or "no diagnostic")
+            raise AdapterError(f"g04.init failed with exit {init.returncode}: {detail[:500]}")
         metadata = self.read_metadata()
-        prefix = self._execute(
-            "g04.prefix.read",
-            ["bd", "config", "get", "issue_prefix", "--json"],
-            cwd=destination,
+        prefix = executor.execute(
+            LiveOperation.BEADS_PREFIX_READ,
+            BeadsPrefixReadRequest(destination),
         )
-        self._require(prefix.data, "prefix", request.beads_prefix, "g04.prefix.read")
+        if prefix.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", prefix.stderr or prefix.stdout or "no diagnostic")
+            raise AdapterError(f"g04.prefix.read failed with exit {prefix.returncode}: {detail[:500]}")
+        # The prefix readback is a JSON scalar; parse and verify it equals the
+        # requested prefix (never substitute the prefix for the read value).
+        prefix_value = prefix.stdout.strip()
+        if prefix_value != request.beads_prefix:
+            raise AdapterError("Beads issue prefix readback does not match the requested prefix")
         self._metadata = metadata
         self._evidence[Gate.BEADS] = (
             f"server metadata read from .beads/metadata.json at 127.0.0.1:3307; "
@@ -1927,56 +1938,65 @@ class LiveAdapter:
         _, _, destination, _ = self._context()
         self.read_metadata()
         expected_remote = self._expected_dolt_remote()
-        before = self._execute(
-            "g05.remote.before",
-            ["bd", "dolt", "remote", "list", "--json"],
-            cwd=destination,
+        executor = self._production_executor()
+        before = executor.execute(
+            LiveOperation.DOLT_REMOTE_LIST,
+            DoltRemoteListRequest(destination),
         )
-        self._require(before.data, "remotes", [], "g05.remote.before")
-        self._execute(
-            "g05.remote.add",
-            ["bd", "dolt", "remote", "add", "origin", expected_remote],
-            cwd=destination,
-            mutating=True,
+        if before.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", before.stderr or before.stdout or "no diagnostic")
+            raise AdapterError(f"g05.remote.before failed with exit {before.returncode}: {detail[:500]}")
+        # The before-state must show no remotes (empty list).
+        if before.stdout.strip() not in ("", "[]"):
+            raise AdapterError("g05.remote.before must show no existing Dolt remotes")
+        add = executor.execute(
+            LiveOperation.DOLT_REMOTE_ADD,
+            DoltRemoteAddRequest(destination, expected_remote),
         )
-        after = self._execute(
-            "g05.remote.read",
-            ["bd", "dolt", "remote", "list", "--json"],
-            cwd=destination,
+        if add.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", add.stderr or add.stdout or "no diagnostic")
+            raise AdapterError(f"g05.remote.add failed with exit {add.returncode}: {detail[:500]}")
+        after = executor.execute(
+            LiveOperation.DOLT_REMOTE_LIST,
+            DoltRemoteListRequest(destination),
         )
-        self._require(
-            after.data,
-            "remotes",
-            [{"name": "origin", "url": expected_remote}],
-            "g05.remote.read",
-        )
+        if after.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", after.stderr or after.stdout or "no diagnostic")
+            raise AdapterError(f"g05.remote.read failed with exit {after.returncode}: {detail[:500]}")
+        if expected_remote not in after.stdout:
+            raise AdapterError("g05.remote.read did not show the exact added origin remote")
         for integration in ("claude", "codex"):
-            self._execute(
-                f"g05.setup.{integration}",
-                ["bd", "setup", integration],
-                cwd=destination,
-                mutating=True,
+            setup = executor.execute(
+                LiveOperation.BEADS_SETUP,
+                BeadsSetupRequest(destination, integration, check=False),
             )
-            check = self._execute(
-                f"g05.setup.{integration}.read",
-                ["bd", "setup", integration, "--check"],
-                cwd=destination,
+            if setup.returncode != 0:
+                detail = _SECRET.sub("[REDACTED]", setup.stderr or setup.stdout or "no diagnostic")
+                raise AdapterError(f"g05.setup.{integration} failed with exit {setup.returncode}: {detail[:500]}")
+            check = executor.execute(
+                LiveOperation.BEADS_SETUP_CHECK,
+                BeadsSetupRequest(destination, integration, check=True),
             )
-            self._require(check.data, "installed", True, f"g05.setup.{integration}.read")
-            self._require(check.data, "integration", integration, f"g05.setup.{integration}.read")
-        self._execute(
-            "g05.hooks.install", ["bd", "hooks", "install"], cwd=destination, mutating=True
+            if check.returncode != 0:
+                detail = _SECRET.sub("[REDACTED]", check.stderr or check.stdout or "no diagnostic")
+                raise AdapterError(f"g05.setup.{integration}.read failed with exit {check.returncode}: {detail[:500]}")
+        install = executor.execute(
+            LiveOperation.BEADS_HOOKS_INSTALL,
+            BeadsHooksInstallRequest(destination),
         )
-        hooks = self._execute(
-            "g05.hooks.read", ["bd", "hooks", "list", "--json"], cwd=destination
+        if install.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", install.stderr or install.stdout or "no diagnostic")
+            raise AdapterError(f"g05.hooks.install failed with exit {install.returncode}: {detail[:500]}")
+        hooks = executor.execute(
+            LiveOperation.BEADS_HOOKS_LIST,
+            BeadsHooksListRequest(destination),
         )
-        self._require(hooks.data, "managed", True, "g05.hooks.read")
-        self._require(
-            hooks.data,
-            "hooks",
-            ["post-checkout", "post-merge", "pre-commit", "pre-push", "prepare-commit-msg"],
-            "g05.hooks.read",
-        )
+        if hooks.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", hooks.stderr or hooks.stdout or "no diagnostic")
+            raise AdapterError(f"g05.hooks.read failed with exit {hooks.returncode}: {detail[:500]}")
+        for hook in ("post-checkout", "post-merge", "pre-commit", "pre-push", "prepare-commit-msg"):
+            if hook not in hooks.stdout:
+                raise AdapterError(f"g05.hooks.read omitted managed hook {hook}")
         self._evidence[Gate.BEADS_REMOTE] = (
             "credential-free HTTPS Dolt origin, Claude/Codex setup, and exact managed hooks read back"
         )

@@ -38,6 +38,14 @@ class LiveOperation(Enum):
     GIT_REMOTE_READBACK = "git-remote-readback"
     GIT_TEMPLATE_REVISION = "git-template-revision"
     COPIER_RENDER = "copier-render"
+    BEADS_INIT = "beads-init"
+    BEADS_PREFIX_READ = "beads-prefix-read"
+    DOLT_REMOTE_LIST = "dolt-remote-list"
+    DOLT_REMOTE_ADD = "dolt-remote-add"
+    BEADS_SETUP = "beads-setup"
+    BEADS_SETUP_CHECK = "beads-setup-check"
+    BEADS_HOOKS_INSTALL = "beads-hooks-install"
+    BEADS_HOOKS_LIST = "beads-hooks-list"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +107,59 @@ class CopierRenderRequest:
     destination: Path
     tag: str
     answers: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BeadsInitRequest:
+    """Initialize Beads once in approved external server mode."""
+
+    destination: Path
+    prefix: str
+
+
+@dataclass(frozen=True, slots=True)
+class BeadsPrefixReadRequest:
+    """Read the configured issue prefix back from the initialized repository."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class DoltRemoteListRequest:
+    """List the repository's Dolt remotes (credential-free readback)."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class DoltRemoteAddRequest:
+    """Add the credential-free HTTPS Git-backed Dolt origin remote."""
+
+    destination: Path
+    remote_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class BeadsSetupRequest:
+    """Run or check the intended Beads agent setup for one integration."""
+
+    destination: Path
+    integration: str
+    check: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BeadsHooksInstallRequest:
+    """Install the managed Beads hooks."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class BeadsHooksListRequest:
+    """Read back the managed Beads hooks."""
+
+    destination: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,6 +509,74 @@ def _copier_render_argv(request: CopierRenderRequest) -> tuple[tuple[str, ...], 
     return tuple(argv), request.destination
 
 
+def _beads_destination_argv(request: object, *, destination: Path, args: tuple[str, ...]) -> tuple[tuple[str, ...], Path]:
+    """Validate a bd destination and build a fixed argv in that checkout."""
+    if not isinstance(destination, Path) or not destination.is_absolute():
+        raise LiveExecutorError("beads destination must be absolute")
+    if ".." in destination.parts:
+        raise LiveExecutorError("beads destination path traversal is forbidden")
+    path_text = str(destination)
+    _reject_secret_or_unsafe_text(path_text, "beads destination")
+    return ("bd", *args), destination
+
+
+def _beads_init_argv(request: BeadsInitRequest) -> tuple[tuple[str, ...], Path]:
+    _reject_secret_or_unsafe_text(request.prefix, "beads prefix")
+    if re.fullmatch(r"[a-z][a-z0-9]{1,15}", request.prefix) is None:
+        raise LiveExecutorError("beads prefix must be 2-16 lowercase alphanumeric starting with a letter")
+    return _beads_destination_argv(
+        request,
+        destination=request.destination,
+        args=(
+            "init", "--server", "--external", "--server-host", "127.0.0.1",
+            "--server-port", "3307", "--prefix", request.prefix,
+            "--non-interactive", "--role", "maintainer", "--skip-agents", "--skip-hooks",
+        ),
+    )
+
+
+def _beads_prefix_read_argv(request: BeadsPrefixReadRequest) -> tuple[tuple[str, ...], Path]:
+    return _beads_destination_argv(
+        request, destination=request.destination, args=("config", "get", "issue_prefix", "--json")
+    )
+
+
+def _dolt_remote_list_argv(request: DoltRemoteListRequest) -> tuple[tuple[str, ...], Path]:
+    return _beads_destination_argv(
+        request, destination=request.destination, args=("dolt", "remote", "list", "--json")
+    )
+
+
+def _dolt_remote_add_argv(request: DoltRemoteAddRequest) -> tuple[tuple[str, ...], Path]:
+    _reject_secret_or_unsafe_text(request.remote_url, "dolt remote url")
+    parsed = urlparse(request.remote_url)
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise LiveExecutorError("dolt remote url must not contain credential userinfo")
+    if not request.remote_url.startswith("git+https://github.com/"):
+        raise LiveExecutorError("dolt remote url must be a credential-free git+https github URL")
+    return _beads_destination_argv(
+        request, destination=request.destination, args=("dolt", "remote", "add", "origin", request.remote_url)
+    )
+
+
+def _beads_setup_argv(request: BeadsSetupRequest) -> tuple[tuple[str, ...], Path]:
+    _reject_secret_or_unsafe_text(request.integration, "beads integration")
+    if request.integration not in ("claude", "codex"):
+        raise LiveExecutorError("beads integration is outside the approved set")
+    args = ("setup", request.integration)
+    if request.check:
+        args = args + ("--check",)
+    return _beads_destination_argv(request, destination=request.destination, args=args)
+
+
+def _beads_hooks_install_argv(request: BeadsHooksInstallRequest) -> tuple[tuple[str, ...], Path]:
+    return _beads_destination_argv(request, destination=request.destination, args=("hooks", "install"))
+
+
+def _beads_hooks_list_argv(request: BeadsHooksListRequest) -> tuple[tuple[str, ...], Path]:
+    return _beads_destination_argv(request, destination=request.destination, args=("hooks", "list", "--json"))
+
+
 def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path | None]:
     del request
     return (
@@ -551,6 +680,14 @@ class ControlledLiveExecutor:
             LiveOperation.GIT_REMOTE_READBACK,
             LiveOperation.GIT_TEMPLATE_REVISION,
             LiveOperation.COPIER_RENDER,
+            LiveOperation.BEADS_INIT,
+            LiveOperation.BEADS_PREFIX_READ,
+            LiveOperation.DOLT_REMOTE_LIST,
+            LiveOperation.DOLT_REMOTE_ADD,
+            LiveOperation.BEADS_SETUP,
+            LiveOperation.BEADS_SETUP_CHECK,
+            LiveOperation.BEADS_HOOKS_INSTALL,
+            LiveOperation.BEADS_HOOKS_LIST,
         ):
             # Build and validate the exact argv, but do not hand it to the test
             # transport: an in-memory transport cannot perform a real clone/render
@@ -664,6 +801,38 @@ def _build_invocation(
         if type(parameters) is not CopierRenderRequest:
             raise LiveExecutorError("live operation received the wrong request type")
         argv, cwd = _copier_render_argv(parameters)
+    elif operation is LiveOperation.BEADS_INIT:
+        if type(parameters) is not BeadsInitRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _beads_init_argv(parameters)
+    elif operation is LiveOperation.BEADS_PREFIX_READ:
+        if type(parameters) is not BeadsPrefixReadRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _beads_prefix_read_argv(parameters)
+    elif operation is LiveOperation.DOLT_REMOTE_LIST:
+        if type(parameters) is not DoltRemoteListRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _dolt_remote_list_argv(parameters)
+    elif operation is LiveOperation.DOLT_REMOTE_ADD:
+        if type(parameters) is not DoltRemoteAddRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _dolt_remote_add_argv(parameters)
+    elif operation is LiveOperation.BEADS_SETUP:
+        if type(parameters) is not BeadsSetupRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _beads_setup_argv(parameters)
+    elif operation is LiveOperation.BEADS_SETUP_CHECK:
+        if type(parameters) is not BeadsSetupRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _beads_setup_argv(parameters)
+    elif operation is LiveOperation.BEADS_HOOKS_INSTALL:
+        if type(parameters) is not BeadsHooksInstallRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _beads_hooks_install_argv(parameters)
+    elif operation is LiveOperation.BEADS_HOOKS_LIST:
+        if type(parameters) is not BeadsHooksListRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _beads_hooks_list_argv(parameters)
     else:  # pragma: no cover - guarded by exact enum admission above
         raise LiveExecutorError("unknown live operation")
 

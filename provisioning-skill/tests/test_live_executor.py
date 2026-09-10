@@ -561,6 +561,14 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.GIT_REMOTE_READBACK,
                 LiveOperation.GIT_TEMPLATE_REVISION,
                 LiveOperation.COPIER_RENDER,
+                LiveOperation.BEADS_INIT,
+                LiveOperation.BEADS_PREFIX_READ,
+                LiveOperation.DOLT_REMOTE_LIST,
+                LiveOperation.DOLT_REMOTE_ADD,
+                LiveOperation.BEADS_SETUP,
+                LiveOperation.BEADS_SETUP_CHECK,
+                LiveOperation.BEADS_HOOKS_INSTALL,
+                LiveOperation.BEADS_HOOKS_LIST,
             },
         )
 
@@ -769,6 +777,90 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         for request in rejected:
             with self.subTest(request=request), self.assertRaises(LiveExecutorError):
                 live_executor._copier_render_argv(request)
+
+    # -- Slice D: Beads init + Dolt remote ---------------------------------
+
+    def test_beads_init_builds_exact_server_mode_argv(self) -> None:
+        from scripts.live_executor import BeadsInitRequest
+
+        destination = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        argv, cwd = live_executor._beads_init_argv(
+            BeadsInitRequest(destination, "demo")
+        )
+        self.assertEqual(
+            argv,
+            (
+                "bd", "init", "--server", "--external", "--server-host", "127.0.0.1",
+                "--server-port", "3307", "--prefix", "demo",
+                "--non-interactive", "--role", "maintainer", "--skip-agents", "--skip-hooks",
+            ),
+        )
+        self.assertEqual(cwd, destination)
+        with self.assertRaisesRegex(LiveExecutorError, "intentionally unavailable"):
+            self.executor.execute(
+                LiveOperation.BEADS_INIT, BeadsInitRequest(destination, "demo")
+            )
+        self.assertEqual(self.transport.calls, [])
+
+    def test_beads_init_rejects_unsafe_prefix_and_destination(self) -> None:
+        from scripts.live_executor import BeadsInitRequest
+
+        for prefix, destination in (
+            ("--force", Path("/tmp/a/demo")),
+            ("Demo", Path("/tmp/a/demo")),
+            ("d", Path("/tmp/a/demo")),
+            ("demo;stop", Path("/tmp/a/demo")),
+            ("demo", Path("relative/demo")),
+            ("demo", Path("/tmp/a/../demo")),
+        ):
+            with self.subTest(prefix=prefix, destination=destination), self.assertRaises(LiveExecutorError):
+                live_executor._beads_init_argv(BeadsInitRequest(destination, prefix))
+
+    def test_dolt_remote_add_rejects_credential_and_non_github_urls(self) -> None:
+        from scripts.live_executor import DoltRemoteAddRequest
+
+        destination = Path("/tmp/a/demo")
+        for url in (
+            "https://x@github.com/pjbeyer/demo.git",
+            "git+https://github.com/pjbeyer/demo.git --force",
+            "ssh://github.com/pjbeyer/demo.git",
+            "https://github.com/pjbeyer/demo.git",
+        ):
+            with self.subTest(url=url), self.assertRaises(LiveExecutorError):
+                live_executor._dolt_remote_add_argv(DoltRemoteAddRequest(destination, url))
+
+        argv, cwd = live_executor._dolt_remote_add_argv(
+            DoltRemoteAddRequest(destination, "git+https://github.com/pjbeyer/demo.git")
+        )
+        self.assertEqual(
+            argv,
+            ("bd", "dolt", "remote", "add", "origin", "git+https://github.com/pjbeyer/demo.git"),
+        )
+        self.assertEqual(cwd, destination)
+
+    def test_beads_setup_rejects_unapproved_integration(self) -> None:
+        from scripts.live_executor import BeadsSetupRequest
+
+        destination = Path("/tmp/a/demo")
+        for integration in ("ghost", "claude;stop", "codex --force"):
+            with self.subTest(integration=integration), self.assertRaises(LiveExecutorError):
+                live_executor._beads_setup_argv(BeadsSetupRequest(destination, integration, check=False))
+
+        argv, _ = live_executor._beads_setup_argv(BeadsSetupRequest(destination, "claude", check=True))
+        self.assertEqual(argv, ("bd", "setup", "claude", "--check"))
+
+    def test_beads_hooks_build_exact_argv(self) -> None:
+        from scripts.live_executor import BeadsHooksInstallRequest, BeadsHooksListRequest
+
+        destination = Path("/tmp/a/demo")
+        self.assertEqual(
+            live_executor._beads_hooks_install_argv(BeadsHooksInstallRequest(destination))[0],
+            ("bd", "hooks", "install"),
+        )
+        self.assertEqual(
+            live_executor._beads_hooks_list_argv(BeadsHooksListRequest(destination))[0],
+            ("bd", "hooks", "list", "--json"),
+        )
 
 
 if __name__ == "__main__":
