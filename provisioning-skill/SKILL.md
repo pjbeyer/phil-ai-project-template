@@ -1,7 +1,7 @@
 ---
 name: project-provisioning
 description: "Use when Phil asks to create, provision, or bootstrap a new GitHub project repository from an empty origin. Defines the approved provisioning contract and runs deterministic simulations only; the retained LiveAdapter draft is fail-closed and no live provisioning path is implemented."
-version: 0.2.1
+version: 0.2.2
 platforms: [macos]
 ---
 
