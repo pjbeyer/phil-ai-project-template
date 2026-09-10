@@ -1,0 +1,14 @@
+provisioning-skill/SKILL.md
+  h_c5be3b3dad7ca8 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "32314882263461fc38cc1fe9ba457d9bf62121ba",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
