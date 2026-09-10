@@ -1,0 +1,22 @@
+provisioning-skill/scripts/adapters.py
+  h_c5be3b3dad7ca8 32,35,1855-1863,1865-1871,1874,1876-1889,1891
+provisioning-skill/scripts/live_executor.py
+  h_c5be3b3dad7ca8 39-40,80-103,186-197,394-450,548-554,556-557,659-666
+provisioning-skill/scripts/models.py
+  h_c5be3b3dad7ca8 94-98,107,124,151-176
+provisioning-skill/tests/test_live_authorization.py
+  h_c5be3b3dad7ca8 310-337
+provisioning-skill/tests/test_live_executor.py
+  h_c5be3b3dad7ca8 562-563,688-772
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.7.6",
+  "base_commit_sha": "abce485d35e8d184dddd3b7e0a99ee5f42d51bd9",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
