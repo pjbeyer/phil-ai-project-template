@@ -53,6 +53,9 @@ class LiveOperation(Enum):
     SPECKIT_INIT = "speckit-init"
     SPECKIT_EXTENSION_ADD = "speckit-extension-add"
     SPECKIT_INTEGRATION_READ = "speckit-integration-read"
+    BD_SEARCH_ISSUES = "bd-search-issues"
+    BD_CREATE_ISSUE = "bd-create-issue"
+    BD_SHOW_ISSUE = "bd-show-issue"
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +248,39 @@ class SpeckitIntegrationReadRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class BdSearchIssuesRequest:
+    """Search the project's own Beads tracker for one stable bootstrap identity.
+
+    ``title`` is the stable duplicate-search key; the built argv scopes it with
+    the ``project-bootstrap:`` external-ref prefix so only bootstrap issues match.
+    """
+
+    destination: Path
+    title: str
+
+
+@dataclass(frozen=True, slots=True)
+class BdCreateIssueRequest:
+    """Create one bootstrap issue in the project's own Beads tracker.
+
+    ``marker`` must be an approved bootstrap marker; the builder derives the
+    stable ``project-bootstrap:<marker>`` external ref and the description.
+    """
+
+    destination: Path
+    marker: str
+    title: str
+
+
+@dataclass(frozen=True, slots=True)
+class BdShowIssueRequest:
+    """Read back one issue by its exact tracker id."""
+
+    destination: Path
+    issue_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class RawResult:
     """Bounded raw process fields; no caller-supplied facts or data map."""
 
@@ -325,6 +361,19 @@ _BEADS_ENV_KEYS = frozenset({"BEADS_DOLT_PORT", "BEADS_DOLT_DATABASE"})
 # `agent-context` is authored by spec-kit-core and installs from the default
 # catalog; community/unvetted names must never reach `specify extension add`.
 _APPROVED_SPECKIT_EXTENSIONS = frozenset({"agent-context"})
+# Stable bootstrap issue markers (FR-016); mirrors models.APPROVED_ISSUE_MARKERS
+# at the command-construction boundary so a marker can never reach `bd create`
+# without being one of the approved stable identities.
+_APPROVED_BOOTSTRAP_MARKERS = frozenset(
+    {
+        "scope-readme",
+        "first-speckit-spec",
+        "macos-cli-real-tests",
+        "homebrew-first-package",
+        "homebrew-actions-secret",
+        "homebrew-lifecycle-tests",
+    }
+)
 # Floating refs must never be rendered or resolved as an immutable revision.
 _FLOATING_REFS = frozenset(
     {
@@ -757,6 +806,59 @@ def _speckit_integration_read_argv(
     return ("specify", "integration", "status", "--json"), destination
 
 
+def _bd_destination(request: object, destination: Path) -> Path:
+    """Validate a Beads tracker destination (absolute, traversal-free)."""
+    if not isinstance(destination, Path) or not destination.is_absolute():
+        raise LiveExecutorError("beads destination must be an absolute path")
+    if ".." in destination.parts:
+        raise LiveExecutorError("beads destination path traversal is forbidden")
+    _reject_secret_or_unsafe_text(str(destination), "beads destination")
+    return destination
+
+
+def _bd_search_issues_argv(request: BdSearchIssuesRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _bd_destination(request, request.destination)
+    _reject_secret_or_unsafe_text(request.title, "bd search title")
+    return (
+        "bd",
+        "search",
+        "--query",
+        request.title,
+        "--external-contains",
+        "project-bootstrap:",
+        "--status",
+        "all",
+        "--json",
+    ), destination
+
+
+def _bd_create_issue_argv(request: BdCreateIssueRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _bd_destination(request, request.destination)
+    _reject_secret_or_unsafe_text(request.marker, "bd create marker")
+    if request.marker not in _APPROVED_BOOTSTRAP_MARKERS:
+        raise LiveExecutorError("bd create marker is outside the approved bootstrap marker set")
+    _reject_secret_or_unsafe_text(request.title, "bd create title")
+    external_ref = f"project-bootstrap:{request.marker}"
+    return (
+        "bd",
+        "create",
+        request.title,
+        "--type",
+        "task",
+        "--external-ref",
+        external_ref,
+        "--description",
+        f"Bootstrap marker: {external_ref}",
+        "--json",
+    ), destination
+
+
+def _bd_show_issue_argv(request: BdShowIssueRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _bd_destination(request, request.destination)
+    _reject_secret_or_unsafe_text(request.issue_id, "bd show issue id")
+    return ("bd", "show", request.issue_id, "--json"), destination
+
+
 def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path | None]:
     del request
     return (
@@ -886,6 +988,9 @@ class ControlledLiveExecutor:
             LiveOperation.SPECKIT_INIT,
             LiveOperation.SPECKIT_EXTENSION_ADD,
             LiveOperation.SPECKIT_INTEGRATION_READ,
+            LiveOperation.BD_SEARCH_ISSUES,
+            LiveOperation.BD_CREATE_ISSUE,
+            LiveOperation.BD_SHOW_ISSUE,
         ):
             # Build and validate the exact argv, but do not hand it to the test
             # transport: an in-memory transport cannot perform a real clone/render
@@ -1059,6 +1164,18 @@ def _build_invocation(
         if type(parameters) is not SpeckitIntegrationReadRequest:
             raise LiveExecutorError("live operation received the wrong request type")
         argv, cwd = _speckit_integration_read_argv(parameters)
+    elif operation is LiveOperation.BD_SEARCH_ISSUES:
+        if type(parameters) is not BdSearchIssuesRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _bd_search_issues_argv(parameters)
+    elif operation is LiveOperation.BD_CREATE_ISSUE:
+        if type(parameters) is not BdCreateIssueRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _bd_create_issue_argv(parameters)
+    elif operation is LiveOperation.BD_SHOW_ISSUE:
+        if type(parameters) is not BdShowIssueRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _bd_show_issue_argv(parameters)
     else:  # pragma: no cover - guarded by exact enum admission above
         raise LiveExecutorError("unknown live operation")
 

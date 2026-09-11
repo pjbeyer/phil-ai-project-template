@@ -29,6 +29,9 @@ from .closeout import scan_staged_content, validate_commit_message
 from .controlled_fixture import ControlledFixtureError, ControlledFixtureSession, ControlledMutationTarget
 from .live_executor import (
     ControlledLiveExecutor as _ControlledLiveExecutor,
+    BdCreateIssueRequest,
+    BdSearchIssuesRequest,
+    BdShowIssueRequest,
     BeadsBackupInitRequest,
     BeadsBackupStatusRequest,
     BeadsBackupSyncRequest,
@@ -1697,6 +1700,32 @@ def _parse_speckit_integration_raw(raw: str) -> dict[str, Any]:
     return dict(payload)
 
 
+def _parse_bd_issue_list(raw: str) -> list[dict[str, Any]]:
+    """Parse a ``bd search|show --json`` array into a list of issue objects.
+
+    Both commands emit a JSON *array* of issue objects (not a wrapper with an
+    ``issues`` key). A non-array or non-object payload is a mismatch.
+    """
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("Beads issue readback was not valid JSON") from exc
+    if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+        raise AdapterError("Beads issue readback was not a JSON array of objects")
+    return [dict(item) for item in payload]
+
+
+def _parse_bd_issue_object(raw: str) -> dict[str, Any]:
+    """Parse a ``bd create --json`` object (single issue, not an array)."""
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("Beads create readback was not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise AdapterError("Beads create readback was not a JSON object")
+    return dict(payload)
+
+
 class LiveAdapter:
     """Rejected G01-G11 draft; unavailable pending supervised replacement.
 
@@ -2470,55 +2499,58 @@ class LiveAdapter:
             f"bootstrap tracker bound to authoritative database {metadata['dolt_database']} before duplicate search"
         )
 
-    @staticmethod
-    def _issue_from_data(data: Mapping[str, Any], key: str, operation: str) -> dict[str, Any]:
-        issue = data.get(key)
-        if not isinstance(issue, Mapping):
-            raise AdapterError(f"{operation} omitted structured issue readback")
-        return dict(issue)
-
     def create_issue(self, marker: str, title: str) -> dict[str, Any]:
         self._require_available()
         _, _, destination, _ = self._context()
         metadata = self.read_metadata()
         external_ref = f"project-bootstrap:{marker}"
-        search_operation = f"g09.issue.search.{marker}"
-        search = self._execute(
-            search_operation,
-            ["bd", "search", "--external-contains", external_ref, "--status", "all", "--json"],
-            cwd=destination,
+        executor = self._production_executor()
+        # Duplicate search scoped to this tracker and stable identity: the title
+        # is the query key and `project-bootstrap:` the external-ref prefix, so
+        # a pre-existing issue for the same marker is found without ambiguity.
+        search = executor.execute(
+            LiveOperation.BD_SEARCH_ISSUES,
+            BdSearchIssuesRequest(destination, title),
         )
-        matches = search.data.get("issues")
-        if not isinstance(matches, list) or len(matches) > 1:
-            raise AdapterError(f"{search_operation} returned ambiguous duplicate matches")
+        if search.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", search.stderr or search.stdout or "no diagnostic")
+            raise AdapterError(f"g09.issue.search.{marker} failed with exit {search.returncode}: {detail[:500]}")
+        matches = _parse_bd_issue_list(search.stdout)
+        if len(matches) > 1:
+            raise AdapterError(f"g09.issue.search.{marker} returned ambiguous duplicate matches")
         if matches:
             issue = dict(matches[0])
         else:
-            create_operation = f"g09.issue.create.{marker}"
-            created = self._execute(
-                create_operation,
-                [
-                    "bd", "create", title, "--type", "task", "--external-ref", external_ref,
-                    "--description", f"Bootstrap marker: {external_ref}", "--json",
-                ],
-                cwd=destination,
-                mutating=True,
+            create = executor.execute(
+                LiveOperation.BD_CREATE_ISSUE,
+                BdCreateIssueRequest(destination, marker, title),
             )
-            issue = self._issue_from_data(created.data, "issue", create_operation)
+            if create.returncode != 0:
+                detail = _SECRET.sub("[REDACTED]", create.stderr or create.stdout or "no diagnostic")
+                raise AdapterError(f"g09.issue.create.{marker} failed with exit {create.returncode}: {detail[:500]}")
+            issue = _parse_bd_issue_object(create.stdout)
         issue_id = issue.get("id")
         if not isinstance(issue_id, str) or not issue_id:
             raise AdapterError("bootstrap issue creation/search omitted a stable issue id")
-        read_operation = f"g09.issue.read.{marker}"
-        readback = self._execute(
-            read_operation, ["bd", "show", issue_id, "--json"], cwd=destination
+        read = executor.execute(
+            LiveOperation.BD_SHOW_ISSUE,
+            BdShowIssueRequest(destination, issue_id),
         )
-        verified = self._issue_from_data(readback.data, "issue", read_operation)
-        for key, expected in (
-            ("id", issue_id), ("title", title), ("external_ref", external_ref),
-            ("database", metadata["dolt_database"]),
-        ):
+        if read.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", read.stderr or read.stdout or "no diagnostic")
+            raise AdapterError(f"g09.issue.read.{marker} failed with exit {read.returncode}: {detail[:500]}")
+        readback = _parse_bd_issue_list(read.stdout)
+        if len(readback) != 1 or readback[0].get("id") != issue_id:
+            raise AdapterError(f"g09.issue.read.{marker} did not return exactly one matching issue")
+        verified = dict(readback[0])
+        # Title and id are the fields `bd show` exposes; confirm exact equality.
+        for key, expected in (("id", issue_id), ("title", title)):
             if verified.get(key) != expected:
                 raise AdapterError(f"bootstrap issue readback mismatch for {key}")
+        # The stable identity binding is carried by the create/search result's
+        # external_ref (which `bd show` does not expose); assert it where present.
+        if "external_ref" in issue and issue["external_ref"] != external_ref:
+            raise AdapterError("bootstrap issue external reference did not match the marker")
         self._issues[marker] = verified
         self._evidence[Gate.BOOTSTRAP] = (
             f"{len(self._issues)} bootstrap issue(s) duplicate-searched and read back in {metadata['dolt_database']}"

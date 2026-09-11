@@ -576,6 +576,9 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.SPECKIT_INIT,
                 LiveOperation.SPECKIT_EXTENSION_ADD,
                 LiveOperation.SPECKIT_INTEGRATION_READ,
+                LiveOperation.BD_SEARCH_ISSUES,
+                LiveOperation.BD_CREATE_ISSUE,
+                LiveOperation.BD_SHOW_ISSUE,
             },
         )
 
@@ -905,6 +908,22 @@ class ControlledLiveExecutorTests(unittest.TestCase):
             with self.subTest(operation=operation), self.assertRaises(LiveExecutorError):
                 self.executor.execute(operation, params)
 
+    def test_bd_issue_operations_are_fail_closed_under_test_transport(self) -> None:
+        from scripts.live_executor import (
+            BdCreateIssueRequest,
+            BdSearchIssuesRequest,
+            BdShowIssueRequest,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        for operation, params in (
+            (LiveOperation.BD_SEARCH_ISSUES, BdSearchIssuesRequest(dest, "T")),
+            (LiveOperation.BD_CREATE_ISSUE, BdCreateIssueRequest(dest, "scope-readme", "T")),
+            (LiveOperation.BD_SHOW_ISSUE, BdShowIssueRequest(dest, "pjb-123")),
+        ):
+            with self.subTest(operation=operation), self.assertRaises(LiveExecutorError):
+                self.executor.execute(operation, params)
+
 
 class BeadsReadbackParserTests(unittest.TestCase):
     """The adapter-owned parsers that turn raw bd --json into exact structures."""
@@ -1136,6 +1155,61 @@ class BeadsReadbackParserTests(unittest.TestCase):
         for raw in bad:
             with self.subTest(raw=raw), self.assertRaises(AdapterError):
                 _parse_speckit_integration_raw(raw)
+
+    def test_bd_search_issues_builds_exact_argv(self) -> None:
+        from scripts.live_executor import BdSearchIssuesRequest
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        argv, cwd = live_executor._bd_search_issues_argv(
+            BdSearchIssuesRequest(dest, "Define initial project scope and README")
+        )
+        self.assertEqual(
+            argv,
+            ("bd", "search", "--query", "Define initial project scope and README",
+             "--external-contains", "project-bootstrap:", "--status", "all", "--json"),
+        )
+        self.assertEqual(cwd, dest)
+
+    def test_bd_create_issue_allowlist_and_argv(self) -> None:
+        from scripts.live_executor import BdCreateIssueRequest
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        argv, cwd = live_executor._bd_create_issue_argv(
+            BdCreateIssueRequest(dest, "scope-readme", "Define initial project scope and README")
+        )
+        self.assertEqual(argv[0:4], ("bd", "create", "Define initial project scope and README", "--type"))
+        self.assertIn("--external-ref", argv)
+        self.assertIn("project-bootstrap:scope-readme", argv)
+        self.assertEqual(cwd, dest)
+        # Unknown markers never reach the CLI.
+        for marker in ("nope", "verify-tasks", "jira", "scope-readme\x00inject"):
+            with self.subTest(marker=marker), self.assertRaises(LiveExecutorError):
+                live_executor._bd_create_issue_argv(BdCreateIssueRequest(dest, marker, "T"))
+
+    def test_bd_show_issue_builds_exact_argv(self) -> None:
+        from scripts.live_executor import BdShowIssueRequest
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        argv, cwd = live_executor._bd_show_issue_argv(BdShowIssueRequest(dest, "pjb-123"))
+        self.assertEqual(argv, ("bd", "show", "pjb-123", "--json"))
+        self.assertEqual(cwd, dest)
+
+    def test_parse_bd_issue_list_and_object(self) -> None:
+        from scripts.adapters import AdapterError, _parse_bd_issue_list, _parse_bd_issue_object
+
+        self.assertEqual(_parse_bd_issue_list("[]"), [])
+        self.assertEqual(
+            _parse_bd_issue_list('[{"id":"pjb-1","title":"t"}]'),
+            [{"id": "pjb-1", "title": "t"}],
+        )
+        obj = _parse_bd_issue_object('{"id":"pjb-1","external_ref":"project-bootstrap:scope-readme"}')
+        self.assertEqual(obj["external_ref"], "project-bootstrap:scope-readme")
+        for list_bad in ("{}", '{"issues":[]}', '"x"', "[1]"):
+            with self.subTest(raw=list_bad), self.assertRaises(AdapterError):
+                _parse_bd_issue_list(list_bad)
+        for obj_bad in ("[]", '"x"', "null"):
+            with self.subTest(raw=obj_bad), self.assertRaises(AdapterError):
+                _parse_bd_issue_object(obj_bad)
 
 
 if __name__ == "__main__":
