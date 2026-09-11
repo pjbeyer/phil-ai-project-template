@@ -68,6 +68,11 @@ from .live_executor import (
 from .production_transport import make_production_executor
 from .manifest import ManifestError, append_record, load_manifest, validate_records
 from .evidence import redact
+from .publish_hygiene import (
+    non_open_source_requires_private,
+    require_publish_hygiene,
+    scan_published_surface,
+)
 from .models import (
     ConfigurationError,
     Gate,
@@ -2617,8 +2622,56 @@ class LiveAdapter:
             f"nonempty staged set secret-scanned, conventional atomic commit, and clean main HEAD {head_sha} read back"
         )
 
+    def _assert_publish_gate(self) -> None:
+        """Enforce FR-029 publish-hygiene + FR-007 origin-visibility before push.
+
+        Fail-closed at the Git push boundary: ``open-source`` admits the run only
+        after the published surface scans clean; every other visibility must have
+        the origin proven ``private`` through the authenticated transport before
+        any push. The origin-visibility probe is a transport capability that has
+        not yet been admitted to the hardened executor allowlist, so the
+        non-open-source branch stops the run rather than assume private.
+        """
+        request, _, destination, _ = self._context()
+
+        # FR-029: scan the rendered working tree and answer metadata. The git
+        # history and bootstrap issue bodies are extracted by the closeout gate
+        # (G10/G11) and would be bound here in the full live path; the surface
+        # they cover is the same scanner, exercised by its own regression suite.
+        rendered_texts: list[tuple[str, str]] = []
+        for path in sorted(destination.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            if ".git" in path.parts or ".beads" in path.parts:
+                continue
+            try:
+                rendered_texts.append((str(path.relative_to(destination)), path.read_text(encoding="utf-8")))
+            except (OSError, UnicodeDecodeError):
+                rendered_texts.append((str(path.relative_to(destination)), "[binary]"))
+        answer_metadata = [
+            ("repository_owner", request.origin_url),
+            ("project_description", request.description),
+            ("project_kind", request.project_kind),
+            ("visibility", request.visibility),
+        ]
+        result = scan_published_surface(
+            rendered_texts=rendered_texts,
+            answer_metadata=answer_metadata,
+        )
+        require_publish_hygiene(result)
+
+        # FR-007: a non-open-source request whose origin is publicly visible
+        # must stop before push. Until the authenticated origin-visibility probe
+        # is admitted, fail closed on every non-open-source visibility.
+        if non_open_source_requires_private(request.visibility):
+            raise AdapterError(
+                "non-open-source visibility requires a proven private origin; "
+                "origin-visibility probe is not yet admitted to the transport allowlist"
+            )
+
     def _g11(self) -> None:
         _, _, destination, _ = self._context()
+        self._assert_publish_gate()
         if self._git_head is None:
             raise AdapterError("Git push boundary has no verified G10 commit")
         executor = self._production_executor()

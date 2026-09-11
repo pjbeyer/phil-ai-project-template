@@ -414,8 +414,8 @@ class ManifestCompatibilityTests(unittest.TestCase):
         self.assertEqual(
             MANIFEST_FIELDS,
             {
-                "version", "generated_from", "managed_server", "required_jobs",
-                "repositories", "maintenance_policy",
+                "version", "generated_from", "vocabulary", "managed_server",
+                "required_jobs", "repositories", "maintenance_policy",
             },
         )
         full = {

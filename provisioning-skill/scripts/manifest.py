@@ -39,9 +39,11 @@ OWNING_JOBS = {
 }
 # The real shared manifest top level: ``repositories`` plus policy/surface fields
 # that the append must preserve byte-for-byte in structure (re-serialized).
+# ``vocabulary`` is added by the FR-030 migration (manifest version 3) and is
+# preserved untouched by append.
 MANIFEST_FIELDS = {
-    "repositories", "version", "generated_from", "managed_server", "required_jobs",
-    "maintenance_policy",
+    "repositories", "version", "generated_from", "vocabulary", "managed_server",
+    "required_jobs", "maintenance_policy",
 }
 # Recognized production legacy policies observed in the live shared manifest, plus
 # the spec-named ``backup-only`` form (FR-013/§123 prose) which denotes the same
@@ -53,7 +55,7 @@ APPROVED_SYNC_POLICIES = frozenset({
     "github-upstream-pull-and-manual-dolt-remote",
     "remote-plus-backup",
 })
-APPROVED_REMOTE_HEALTH = frozenset({"required", "not-configured"})
+APPROVED_REMOTE_HEALTH = frozenset({"required", "known-auth-blocked", "not-configured"})
 APPROVED_RESTORE_TIERS = frozenset({"rotating", "canonical"})
 # Existing records may carry these optional members in recognized shapes.
 OPTIONAL_RECORD_FIELDS = frozenset({"prefix", "project_kind", "visibility", "remote_exception"})
