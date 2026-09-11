@@ -1,0 +1,14 @@
+provisioning-skill/scripts/provision_project.py
+  h_c5be3b3dad7ca8 34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.7.6",
+  "base_commit_sha": "459edfaa2e717c8a749301366d9b436a62344415",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
