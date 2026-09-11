@@ -1,0 +1,16 @@
+provisioning-skill/scripts/adapters.py
+  h_c5be3b3dad7ca8 1564-1635,1994-1997,2022-2024,2040-2041,2072-2078
+provisioning-skill/tests/test_live_executor.py
+  h_c5be3b3dad7ca8 866-923
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.7.6",
+  "base_commit_sha": "6cd6a69da36a59bc56ff22fdcdc2fae06036ba13",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
