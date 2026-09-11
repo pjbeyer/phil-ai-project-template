@@ -30,6 +30,7 @@ from .controlled_fixture import ControlledFixtureError, ControlledFixtureSession
 from .live_executor import (
     ControlledLiveExecutor as _ControlledLiveExecutor,
     BdCreateIssueRequest,
+    BdDoltPushRequest,
     BdSearchIssuesRequest,
     BdShowIssueRequest,
     BeadsBackupInitRequest,
@@ -49,6 +50,8 @@ from .live_executor import (
     GitCommitRequest,
     GitDiffCachedNamesRequest,
     GitDiffCachedTextRequest,
+    GitLsRemoteMainRequest,
+    GitPushRequest,
     GitRemoteReadbackRequest,
     GitRevParseHeadRequest,
     GitStatusAllRequest,
@@ -1767,6 +1770,25 @@ def _parse_git_rev_parse_head(raw: str) -> str:
     return value
 
 
+def _parse_git_ls_remote_main(raw: str) -> str:
+    """Parse ``git ls-remote origin refs/heads/main`` into the remote SHA.
+
+    A synced remote emits exactly one line ``<sha>\trefs/heads/main``; any other
+    shape (empty, multiple lines, missing tab, non-SHA first field) is a sync
+    failure, never silently elided.
+    """
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise AdapterError("ls-remote main readback did not contain exactly one ref line")
+    fields = lines[0].split("\t")
+    if len(fields) != 2 or fields[1] != "refs/heads/main":
+        raise AdapterError("ls-remote main readback was not refs/heads/main")
+    sha = fields[0].strip()
+    if not _SHA.fullmatch(sha):
+        raise AdapterError("ls-remote main readback omitted a full remote SHA")
+    return sha
+
+
 class LiveAdapter:
     """Rejected G01-G11 draft; unavailable pending supervised replacement.
 
@@ -2674,27 +2696,77 @@ class LiveAdapter:
         )
 
     def _g11(self) -> None:
-        # Remote push (G11) is deferred to a separately-reviewed remote-write
-        # task: the executor's destructive-command guard keeps the `push` token
-        # hard-blocked, and no live path may reach `git push`/`bd dolt push`.
-        raise AdapterError(
-            "G11 remote push is not implemented; it requires independent review "
-            "of a narrow exact-argv push exception before any remote write"
+        _, _, destination, _ = self._context()
+        if self._git_head is None:
+            raise AdapterError("Git push boundary has no verified G10 commit")
+        executor = self._production_executor()
+        # Revalidate origin/main identity immediately before the remote-write
+        # boundary (FR-007/FR-019): a changed or ambiguous remote stops the run
+        # before any push.
+        remote = executor.execute(
+            LiveOperation.GIT_LS_REMOTE_MAIN,
+            GitLsRemoteMainRequest(destination),
         )
+        if remote.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", remote.stderr or remote.stdout or "no diagnostic")
+            raise AdapterError(f"g11.ls-remote failed with exit {remote.returncode}: {detail[:500]}")
+        _parse_git_ls_remote_main(remote.stdout)
+        # Push main to the exact approved origin upstream (credential-scoped).
+        pushed = executor.execute(
+            LiveOperation.GIT_PUSH,
+            GitPushRequest(destination),
+        )
+        if pushed.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", pushed.stderr or pushed.stdout or "no diagnostic")
+            raise AdapterError(f"g11.git.push failed with exit {pushed.returncode}: {detail[:500]}")
+        # Prove HEAD == upstream by reading the live remote ref back (FR-019).
+        verify = executor.execute(
+            LiveOperation.GIT_LS_REMOTE_MAIN,
+            GitLsRemoteMainRequest(destination),
+        )
+        if verify.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", verify.stderr or verify.stdout or "no diagnostic")
+            raise AdapterError(f"g11.git.read failed with exit {verify.returncode}: {detail[:500]}")
+        remote_sha = _parse_git_ls_remote_main(verify.stdout)
+        if remote_sha != self._git_head:
+            raise AdapterError("g11 Git HEAD does not equal the upstream main SHA")
+        self._evidence[Gate.PUSH] = "Git main pushed and exact HEAD == upstream read back"
 
     def push_git(self) -> None:
         self._require_available()
-        raise AdapterError(
-            "G11 Git push is not implemented; it requires independent review "
-            "of a narrow exact-argv push exception before any remote write"
+        _, _, destination, _ = self._context()
+        assert self._git_head is not None
+        executor = self._production_executor()
+        pushed = executor.execute(
+            LiveOperation.GIT_PUSH,
+            GitPushRequest(destination),
         )
+        if pushed.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", pushed.stderr or pushed.stdout or "no diagnostic")
+            raise AdapterError(f"Git push failed with exit {pushed.returncode}: {detail[:500]}")
+        verify = executor.execute(
+            LiveOperation.GIT_LS_REMOTE_MAIN,
+            GitLsRemoteMainRequest(destination),
+        )
+        if verify.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", verify.stderr or verify.stdout or "no diagnostic")
+            raise AdapterError(f"Git push readback failed with exit {verify.returncode}: {detail[:500]}")
+        if _parse_git_ls_remote_main(verify.stdout) != self._git_head:
+            raise AdapterError("Git HEAD does not equal the upstream main SHA after push")
 
     def push_dolt(self) -> None:
         self._require_available()
-        raise AdapterError(
-            "G11 Dolt push is not implemented; it requires independent review "
-            "of a narrow exact-argv push exception before any remote write"
+        _, _, destination, _ = self._context()
+        executor = self._production_executor()
+        result = executor.execute(
+            LiveOperation.BD_DOLT_PUSH,
+            BdDoltPushRequest(destination),
         )
+        if result.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", result.stderr or result.stdout or "no diagnostic")
+            raise AdapterError(f"Dolt push failed with exit {result.returncode}: {detail[:500]}")
+        if "Push complete." not in result.stdout:
+            raise AdapterError("Dolt push output did not contain exact 'Push complete.' evidence")
 
     def read_metadata(self) -> dict[str, Any]:
         self._require_available()

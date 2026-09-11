@@ -586,6 +586,9 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.GIT_COMMIT,
                 LiveOperation.GIT_REV_PARSE_HEAD,
                 LiveOperation.GIT_STATUS_BRANCH,
+                LiveOperation.GIT_PUSH,
+                LiveOperation.GIT_LS_REMOTE_MAIN,
+                LiveOperation.BD_DOLT_PUSH,
             },
         )
 
@@ -933,10 +936,13 @@ class ControlledLiveExecutorTests(unittest.TestCase):
 
     def test_git_closeout_operations_are_fail_closed_under_test_transport(self) -> None:
         from scripts.live_executor import (
+            BdDoltPushRequest,
             GitAddAllRequest,
             GitCommitRequest,
             GitDiffCachedNamesRequest,
             GitDiffCachedTextRequest,
+            GitLsRemoteMainRequest,
+            GitPushRequest,
             GitRevParseHeadRequest,
             GitStatusAllRequest,
             GitStatusBranchRequest,
@@ -951,9 +957,32 @@ class ControlledLiveExecutorTests(unittest.TestCase):
             (LiveOperation.GIT_COMMIT, GitCommitRequest(dest, "chore: initialize project operating baseline")),
             (LiveOperation.GIT_REV_PARSE_HEAD, GitRevParseHeadRequest(dest)),
             (LiveOperation.GIT_STATUS_BRANCH, GitStatusBranchRequest(dest)),
+            (LiveOperation.GIT_PUSH, GitPushRequest(dest)),
+            (LiveOperation.GIT_LS_REMOTE_MAIN, GitLsRemoteMainRequest(dest)),
+            (LiveOperation.BD_DOLT_PUSH, BdDoltPushRequest(dest)),
         ):
             with self.subTest(operation=operation), self.assertRaises(LiveExecutorError):
                 self.executor.execute(operation, params)
+
+    def test_push_exception_admits_only_exact_push_argv(self) -> None:
+        """The narrow push exception: the exact module-built push argv passes the
+        shared validator; a hand-forged `push` in a non-push operation is still
+        rejected by the forbidden-token guard."""
+        from scripts.live_executor import (
+            BdDoltPushRequest,
+            GitLsRemoteMainRequest,
+            GitPushRequest,
+            _build_invocation,
+            LiveExecutorError,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        home = self.home
+        # Approved push argv pass validation (no destructive-token rejection).
+        _build_invocation(LiveOperation.GIT_PUSH, GitPushRequest(dest), home)
+        _build_invocation(LiveOperation.BD_DOLT_PUSH, BdDoltPushRequest(dest), home)
+        # The readback op is unchanged and must still pass.
+        _build_invocation(LiveOperation.GIT_LS_REMOTE_MAIN, GitLsRemoteMainRequest(dest), home)
 
 
 class BeadsReadbackParserTests(unittest.TestCase):
@@ -1244,10 +1273,13 @@ class BeadsReadbackParserTests(unittest.TestCase):
 
     def test_git_closeout_argv_builders(self) -> None:
         from scripts.live_executor import (
+            BdDoltPushRequest,
             GitAddAllRequest,
             GitCommitRequest,
             GitDiffCachedNamesRequest,
             GitDiffCachedTextRequest,
+            GitLsRemoteMainRequest,
+            GitPushRequest,
             GitRevParseHeadRequest,
             GitStatusAllRequest,
             GitStatusBranchRequest,
@@ -1269,10 +1301,24 @@ class BeadsReadbackParserTests(unittest.TestCase):
              ("git", "--no-optional-locks", "-C", str(dest), "rev-parse", "HEAD")),
             (live_executor._git_status_branch_argv(GitStatusBranchRequest(dest)),
              ("git", "--no-optional-locks", "-C", str(dest), "status", "--porcelain=v1", "--branch")),
+            (live_executor._git_push_argv(GitPushRequest(dest)),
+             ("git", "--no-optional-locks", "-C", str(dest), "push", "--set-upstream", "origin", "main")),
+            (live_executor._git_ls_remote_main_argv(GitLsRemoteMainRequest(dest)),
+             ("git", "--no-optional-locks", "-C", str(dest), "ls-remote", "origin", "refs/heads/main")),
+            (live_executor._bd_dolt_push_argv(BdDoltPushRequest(dest)),
+             ("bd", "dolt", "push", "--remote", "origin")),
         )
         for (argv, cwd), expected in cases:
             self.assertEqual(argv, expected)
             self.assertEqual(cwd, dest)
+
+    def test_push_token_is_still_force_blocked(self) -> None:
+        # The narrow push exception permits the exact module-built push argv, but
+        # --force/-f must remain hard-blocked everywhere (never in _FORBIDDEN)
+        from scripts.live_executor import _FORBIDDEN_TOKENS
+
+        self.assertIn("--force", _FORBIDDEN_TOKENS)
+        self.assertIn("-f", _FORBIDDEN_TOKENS)
 
     def test_parse_git_porcelain_branch(self) -> None:
         from scripts.adapters import AdapterError, _parse_git_porcelain_branch
@@ -1300,6 +1346,21 @@ class BeadsReadbackParserTests(unittest.TestCase):
         for bad in ("", "short", "a" * 39, "g" * 40):
             with self.subTest(raw=bad), self.assertRaises(AdapterError):
                 _parse_git_rev_parse_head(bad)
+
+    def test_parse_git_ls_remote_main(self) -> None:
+        from scripts.adapters import AdapterError, _parse_git_ls_remote_main
+
+        sha = "a" * 40
+        self.assertEqual(_parse_git_ls_remote_main(f"{sha}\trefs/heads/main\n"), sha)
+        for bad in (
+            "",
+            f"{sha}\trefs/heads/other\n",
+            f"{sha}\trefs/heads/main\n{sha}\trefs/heads/other\n",
+            "notasharefs/heads/main\n",
+            f"{sha} refs/heads/main\n",
+        ):
+            with self.subTest(raw=bad), self.assertRaises(AdapterError):
+                _parse_git_ls_remote_main(bad)
 
 
 if __name__ == "__main__":

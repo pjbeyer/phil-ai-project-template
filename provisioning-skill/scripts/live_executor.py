@@ -63,6 +63,9 @@ class LiveOperation(Enum):
     GIT_COMMIT = "git-commit"
     GIT_REV_PARSE_HEAD = "git-rev-parse-head"
     GIT_STATUS_BRANCH = "git-status-branch"
+    GIT_PUSH = "git-push"
+    GIT_LS_REMOTE_MAIN = "git-ls-remote-main"
+    BD_DOLT_PUSH = "bd-dolt-push"
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +339,32 @@ class GitRevParseHeadRequest:
 @dataclass(frozen=True, slots=True)
 class GitStatusBranchRequest:
     """Read the post-commit porcelain status with branch/head context."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitPushRequest:
+    """Push the committed ``main`` to the exact approved ``origin`` upstream.
+
+    Authentication is delegated to the operator's credential helper via the
+    fixed minimal environment; no credential value enters argv/env. ``--force``
+    is structurally unreachable (never in the module-built argv).
+    """
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitLsRemoteMainRequest:
+    """Read the live remote ``refs/heads/main`` SHA to prove HEAD == upstream."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class BdDoltPushRequest:
+    """Push the project's Dolt commits to its configured ``origin`` remote."""
 
     destination: Path
 
@@ -982,6 +1011,27 @@ def _git_status_branch_argv(request: GitStatusBranchRequest) -> tuple[tuple[str,
     ), destination
 
 
+def _git_push_argv(request: GitPushRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _git_checkout_destination(request, request.destination)
+    return (
+        "git", "--no-optional-locks", "-C", str(destination),
+        "push", "--set-upstream", "origin", "main",
+    ), destination
+
+
+def _git_ls_remote_main_argv(request: GitLsRemoteMainRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _git_checkout_destination(request, request.destination)
+    return (
+        "git", "--no-optional-locks", "-C", str(destination),
+        "ls-remote", "origin", "refs/heads/main",
+    ), destination
+
+
+def _bd_dolt_push_argv(request: BdDoltPushRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _bd_destination(request, request.destination)
+    return ("bd", "dolt", "push", "--remote", "origin"), destination
+
+
 def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path | None]:
     del request
     return (
@@ -1012,9 +1062,19 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
     speckit_script_value = (
         invocation.operation is LiveOperation.SPECKIT_INIT and lowered[0] == "specify"
     )
+    # The narrow remote-write exception (approved 2026-09-11): the literal token
+    # `push` is permitted ONLY for the two exact module-constructed push argv
+    # (`git push --set-upstream origin main`, `bd dolt push --remote origin`).
+    # No other operation may carry `push`, and `--force`/`-f` stay hard-blocked
+    # by their own tokens below. This is the sole gate on remote-write verbs.
+    push_value = invocation.operation in (
+        LiveOperation.GIT_PUSH,
+        LiveOperation.BD_DOLT_PUSH,
+    )
     if any(
         argument in _FORBIDDEN_TOKENS
         and not (speckit_script_value and argument == "sh")
+        and not (push_value and argument == "push")
         for argument in lowered
     ):
         raise LiveExecutorError("controlled invocation contains a destructive or service-control form")
@@ -1121,6 +1181,9 @@ class ControlledLiveExecutor:
             LiveOperation.GIT_COMMIT,
             LiveOperation.GIT_REV_PARSE_HEAD,
             LiveOperation.GIT_STATUS_BRANCH,
+            LiveOperation.GIT_PUSH,
+            LiveOperation.GIT_LS_REMOTE_MAIN,
+            LiveOperation.BD_DOLT_PUSH,
         ):
             # Build and validate the exact argv, but do not hand it to the test
             # transport: an in-memory transport cannot perform a real clone/render
@@ -1334,6 +1397,18 @@ def _build_invocation(
         if type(parameters) is not GitStatusBranchRequest:
             raise LiveExecutorError("live operation received the wrong request type")
         argv, cwd = _git_status_branch_argv(parameters)
+    elif operation is LiveOperation.GIT_PUSH:
+        if type(parameters) is not GitPushRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_push_argv(parameters)
+    elif operation is LiveOperation.GIT_LS_REMOTE_MAIN:
+        if type(parameters) is not GitLsRemoteMainRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_ls_remote_main_argv(parameters)
+    elif operation is LiveOperation.BD_DOLT_PUSH:
+        if type(parameters) is not BdDoltPushRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _bd_dolt_push_argv(parameters)
     else:  # pragma: no cover - guarded by exact enum admission above
         raise LiveExecutorError("unknown live operation")
 
