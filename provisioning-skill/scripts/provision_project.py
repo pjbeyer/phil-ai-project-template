@@ -31,6 +31,7 @@ from .adapters import (
 )
 from .bootstrap_issues import ensure_bootstrap_issues
 from .controlled_fixture import ControlledFixtureError, ControlledFixtureSession
+from .manifest import OWNING_JOBS
 from .evidence import (
     InspectionEvidence,
     InspectionFinding,
@@ -60,12 +61,6 @@ POST_PREFLIGHT = (
     Gate.CLONE, Gate.RENDER, Gate.BEADS, Gate.BEADS_REMOTE, Gate.MANIFEST,
     Gate.BACKUP, Gate.SPECKIT, Gate.BOOTSTRAP, Gate.COMMIT, Gate.PUSH,
 )
-OWNING_JOBS = [
-    "Hermes: Beads health review",
-    "Hermes: compliance audit",
-    "Hermes: Beads Dolt maintenance",
-    "Hermes: Beads Dolt integrity review",
-]
 
 
 class InspectionControlError(RuntimeError):
