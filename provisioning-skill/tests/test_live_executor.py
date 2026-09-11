@@ -579,6 +579,13 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.BD_SEARCH_ISSUES,
                 LiveOperation.BD_CREATE_ISSUE,
                 LiveOperation.BD_SHOW_ISSUE,
+                LiveOperation.GIT_STATUS_ALL,
+                LiveOperation.GIT_ADD_ALL,
+                LiveOperation.GIT_DIFF_CACHED_NAMES,
+                LiveOperation.GIT_DIFF_CACHED_TEXT,
+                LiveOperation.GIT_COMMIT,
+                LiveOperation.GIT_REV_PARSE_HEAD,
+                LiveOperation.GIT_STATUS_BRANCH,
             },
         )
 
@@ -924,6 +931,30 @@ class ControlledLiveExecutorTests(unittest.TestCase):
             with self.subTest(operation=operation), self.assertRaises(LiveExecutorError):
                 self.executor.execute(operation, params)
 
+    def test_git_closeout_operations_are_fail_closed_under_test_transport(self) -> None:
+        from scripts.live_executor import (
+            GitAddAllRequest,
+            GitCommitRequest,
+            GitDiffCachedNamesRequest,
+            GitDiffCachedTextRequest,
+            GitRevParseHeadRequest,
+            GitStatusAllRequest,
+            GitStatusBranchRequest,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        for operation, params in (
+            (LiveOperation.GIT_STATUS_ALL, GitStatusAllRequest(dest)),
+            (LiveOperation.GIT_ADD_ALL, GitAddAllRequest(dest)),
+            (LiveOperation.GIT_DIFF_CACHED_NAMES, GitDiffCachedNamesRequest(dest)),
+            (LiveOperation.GIT_DIFF_CACHED_TEXT, GitDiffCachedTextRequest(dest)),
+            (LiveOperation.GIT_COMMIT, GitCommitRequest(dest, "chore: initialize project operating baseline")),
+            (LiveOperation.GIT_REV_PARSE_HEAD, GitRevParseHeadRequest(dest)),
+            (LiveOperation.GIT_STATUS_BRANCH, GitStatusBranchRequest(dest)),
+        ):
+            with self.subTest(operation=operation), self.assertRaises(LiveExecutorError):
+                self.executor.execute(operation, params)
+
 
 class BeadsReadbackParserTests(unittest.TestCase):
     """The adapter-owned parsers that turn raw bd --json into exact structures."""
@@ -1210,6 +1241,65 @@ class BeadsReadbackParserTests(unittest.TestCase):
         for obj_bad in ("[]", '"x"', "null"):
             with self.subTest(raw=obj_bad), self.assertRaises(AdapterError):
                 _parse_bd_issue_object(obj_bad)
+
+    def test_git_closeout_argv_builders(self) -> None:
+        from scripts.live_executor import (
+            GitAddAllRequest,
+            GitCommitRequest,
+            GitDiffCachedNamesRequest,
+            GitDiffCachedTextRequest,
+            GitRevParseHeadRequest,
+            GitStatusAllRequest,
+            GitStatusBranchRequest,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        cases = (
+            (live_executor._git_status_all_argv(GitStatusAllRequest(dest)),
+             ("git", "--no-optional-locks", "-C", str(dest), "status", "--porcelain=v1", "--untracked-files=all")),
+            (live_executor._git_add_all_argv(GitAddAllRequest(dest)),
+             ("git", "--no-optional-locks", "-C", str(dest), "add", "--all")),
+            (live_executor._git_diff_cached_names_argv(GitDiffCachedNamesRequest(dest)),
+             ("git", "--no-optional-locks", "-C", str(dest), "diff", "--cached", "--name-only")),
+            (live_executor._git_diff_cached_text_argv(GitDiffCachedTextRequest(dest)),
+             ("git", "--no-optional-locks", "-C", str(dest), "diff", "--cached")),
+            (live_executor._git_commit_argv(GitCommitRequest(dest, "chore: x")),
+             ("git", "--no-optional-locks", "-C", str(dest), "commit", "-m", "chore: x")),
+            (live_executor._git_rev_parse_head_argv(GitRevParseHeadRequest(dest)),
+             ("git", "--no-optional-locks", "-C", str(dest), "rev-parse", "HEAD")),
+            (live_executor._git_status_branch_argv(GitStatusBranchRequest(dest)),
+             ("git", "--no-optional-locks", "-C", str(dest), "status", "--porcelain=v1", "--branch")),
+        )
+        for (argv, cwd), expected in cases:
+            self.assertEqual(argv, expected)
+            self.assertEqual(cwd, dest)
+
+    def test_parse_git_porcelain_branch(self) -> None:
+        from scripts.adapters import AdapterError, _parse_git_porcelain_branch
+
+        clean_main = "## main...origin/main\n"
+        self.assertEqual(_parse_git_porcelain_branch(clean_main)["branch"], "main")
+        self.assertTrue(_parse_git_porcelain_branch(clean_main)["clean"])
+        dirty = "## main...origin/main\n M README.md\n?? new.txt\n"
+        parsed = _parse_git_porcelain_branch(dirty)
+        self.assertEqual(parsed["branch"], "main")
+        self.assertFalse(parsed["clean"])
+        self.assertEqual(len(parsed["entries"]), 2)
+        with self.assertRaises(AdapterError):
+            _parse_git_porcelain_branch("")
+        with self.assertRaises(AdapterError):
+            _parse_git_porcelain_branch("no header here\n M x\n")
+
+    def test_parse_git_staged_paths_and_rev_parse_head(self) -> None:
+        from scripts.adapters import AdapterError, _parse_git_rev_parse_head, _parse_git_staged_paths
+
+        self.assertEqual(_parse_git_staged_paths("a.txt\nb/c.txt\n"), ["a.txt", "b/c.txt"])
+        with self.assertRaises(AdapterError):
+            _parse_git_staged_paths("\n")
+        self.assertEqual(_parse_git_rev_parse_head("a" * 40 + "\n"), "a" * 40)
+        for bad in ("", "short", "a" * 39, "g" * 40):
+            with self.subTest(raw=bad), self.assertRaises(AdapterError):
+                _parse_git_rev_parse_head(bad)
 
 
 if __name__ == "__main__":

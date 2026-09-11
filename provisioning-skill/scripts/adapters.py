@@ -44,8 +44,15 @@ from .live_executor import (
     CoverageAuditRequest,
     DoltRemoteAddRequest,
     DoltRemoteListRequest,
+    GitAddAllRequest,
     GitCloneRequest,
+    GitCommitRequest,
+    GitDiffCachedNamesRequest,
+    GitDiffCachedTextRequest,
     GitRemoteReadbackRequest,
+    GitRevParseHeadRequest,
+    GitStatusAllRequest,
+    GitStatusBranchRequest,
     GitTemplateRevisionRequest,
     LiveOperation,
     SpeckitExtensionAddRequest,
@@ -1726,6 +1733,40 @@ def _parse_bd_issue_object(raw: str) -> dict[str, Any]:
     return dict(payload)
 
 
+def _parse_git_porcelain_branch(raw: str) -> dict[str, Any]:
+    """Parse ``git status --porcelain=v1 --branch`` into branch/head/clean fields.
+
+    The first line is ``## <branch>...`` (optionally with tracking/ahead-behind);
+    every subsequent nonempty line is one changed entry. "clean" means zero
+    change entries. The exact branch and HEAD are returned for downstream checks.
+    """
+    lines = raw.splitlines()
+    if not lines or not lines[0].startswith("## "):
+        raise AdapterError("git porcelain status omitted the branch header")
+    header = lines[0][3:].strip()
+    branch = header.split("...", 1)[0].strip()
+    if not branch or any(character.isspace() for character in branch):
+        raise AdapterError("git porcelain status branch is unsafe")
+    entries = [line for line in lines[1:] if line.strip()]
+    return {"branch": branch, "clean": not entries, "entries": entries}
+
+
+def _parse_git_staged_paths(raw: str) -> list[str]:
+    """Parse ``git diff --cached --name-only`` into a list of staged paths."""
+    paths = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not paths:
+        raise AdapterError("staged-set readback contained no paths")
+    return paths
+
+
+def _parse_git_rev_parse_head(raw: str) -> str:
+    """Parse ``git rev-parse HEAD`` into the exact full commit SHA."""
+    value = raw.strip()
+    if not _SHA.fullmatch(value):
+        raise AdapterError("commit readback omitted a full HEAD SHA")
+    return value
+
+
 class LiveAdapter:
     """Rejected G01-G11 draft; unavailable pending supervised replacement.
 
@@ -2558,105 +2599,101 @@ class LiveAdapter:
         return dict(verified)
 
     def _g10(self) -> None:
-        request, _, destination, _ = self._context()
-        validation = self._execute(
-            "g10.validation.read",
-            ["git", "-C", str(destination), "status", "--porcelain=v1", "--untracked-files=all"],
-            cwd=destination,
+        _, _, destination, _ = self._context()
+        executor = self._production_executor()
+        # Pre-commit validation from the exact porcelain surface: the branch must
+        # be main, and the checkout must contain staged/unstaged material to commit.
+        status = executor.execute(
+            LiveOperation.GIT_STATUS_ALL,
+            GitStatusAllRequest(destination),
         )
-        for key, expected in (
-            ("branch", "main"), ("render_valid", True), ("json_yaml_valid", True),
-            ("ci_kind", request.project_kind), ("unexpected_paths", []),
-            ("secret_findings", []), ("dolt_non_ignored_dirty", []),
-        ):
-            self._require(validation.data, key, expected, "g10.validation.read")
-        self._execute(
-            "g10.stage", ["git", "-C", str(destination), "add", "--all"],
-            cwd=destination, mutating=True
+        if status.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", status.stderr or status.stdout or "no diagnostic")
+            raise AdapterError(f"g10.status failed with exit {status.returncode}: {detail[:500]}")
+        pre = _parse_git_porcelain_branch(status.stdout)
+        if pre["branch"] != "main":
+            raise AdapterError("g10 checkout is not on main")
+        # Stage every change (FR-019: nonempty staged set).
+        stage = executor.execute(
+            LiveOperation.GIT_ADD_ALL,
+            GitAddAllRequest(destination),
         )
-        staged = self._execute(
-            "g10.staged.read",
-            ["git", "-C", str(destination), "diff", "--cached", "--name-only"],
-            cwd=destination,
+        if stage.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", stage.stderr or stage.stdout or "no diagnostic")
+            raise AdapterError(f"g10.stage failed with exit {stage.returncode}: {detail[:500]}")
+        names = executor.execute(
+            LiveOperation.GIT_DIFF_CACHED_NAMES,
+            GitDiffCachedNamesRequest(destination),
         )
-        paths = staged.data.get("paths")
-        content = staged.data.get("content")
-        if not isinstance(paths, list) or not paths or not isinstance(content, str):
-            raise AdapterError("staged-set readback must contain nonempty paths and exact content")
+        if names.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", names.stderr or names.stdout or "no diagnostic")
+            raise AdapterError(f"g10.staged.read failed with exit {names.returncode}: {detail[:500]}")
+        _parse_git_staged_paths(names.stdout)
+        diff = executor.execute(
+            LiveOperation.GIT_DIFF_CACHED_TEXT,
+            GitDiffCachedTextRequest(destination),
+        )
+        if diff.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", diff.stderr or diff.stdout or "no diagnostic")
+            raise AdapterError(f"g10.staged.content failed with exit {diff.returncode}: {detail[:500]}")
         try:
-            scan_staged_content(content)
+            scan_staged_content(diff.stdout)
             validate_commit_message(_COMMIT_MESSAGE)
         except ValueError as exc:
             raise AdapterError(str(exc)) from exc
-        committed = self._execute(
-            "g10.commit",
-            ["git", "-C", str(destination), "commit", "-m", _COMMIT_MESSAGE],
-            cwd=destination,
-            mutating=True,
+        commit = executor.execute(
+            LiveOperation.GIT_COMMIT,
+            GitCommitRequest(destination, _COMMIT_MESSAGE),
         )
-        head = committed.data.get("head")
-        if not isinstance(head, str) or not _SHA.fullmatch(head):
-            raise AdapterError("commit readback omitted a full HEAD SHA")
-        self._git_head = head
-        clean = self._execute(
-            "g10.commit.read",
-            ["git", "-C", str(destination), "status", "--porcelain=v1", "--branch"],
-            cwd=destination,
+        if commit.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", commit.stderr or commit.stdout or "no diagnostic")
+            raise AdapterError(f"g10.commit failed with exit {commit.returncode}: {detail[:500]}")
+        head = executor.execute(
+            LiveOperation.GIT_REV_PARSE_HEAD,
+            GitRevParseHeadRequest(destination),
         )
-        self._require(clean.data, "branch", "main", "g10.commit.read")
-        self._require(clean.data, "clean", True, "g10.commit.read")
-        self._require(clean.data, "head", head, "g10.commit.read")
+        if head.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", head.stderr or head.stdout or "no diagnostic")
+            raise AdapterError(f"g10.head.read failed with exit {head.returncode}: {detail[:500]}")
+        head_sha = _parse_git_rev_parse_head(head.stdout)
+        self._git_head = head_sha
+        clean = executor.execute(
+            LiveOperation.GIT_STATUS_BRANCH,
+            GitStatusBranchRequest(destination),
+        )
+        if clean.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", clean.stderr or clean.stdout or "no diagnostic")
+            raise AdapterError(f"g10.commit.read failed with exit {clean.returncode}: {detail[:500]}")
+        post = _parse_git_porcelain_branch(clean.stdout)
+        if post["branch"] != "main":
+            raise AdapterError("g10 commit readback is not on main")
+        if not post["clean"]:
+            raise AdapterError("g10 commit readback reported a non-clean checkout")
         self._evidence[Gate.COMMIT] = (
-            f"render/config/hygiene/Dolt checks, nonempty staged set, conventional atomic commit, and clean HEAD {head} read back"
+            f"nonempty staged set secret-scanned, conventional atomic commit, and clean main HEAD {head_sha} read back"
         )
 
     def _g11(self) -> None:
-        self._repository_readback("g11.repository.pre-push")
-        if self._git_head is None:
-            raise AdapterError("Git push boundary has no verified G10 commit")
-        self._evidence[Gate.PUSH] = "exact main/origin identity revalidated immediately before independent pushes"
+        # Remote push (G11) is deferred to a separately-reviewed remote-write
+        # task: the executor's destructive-command guard keeps the `push` token
+        # hard-blocked, and no live path may reach `git push`/`bd dolt push`.
+        raise AdapterError(
+            "G11 remote push is not implemented; it requires independent review "
+            "of a narrow exact-argv push exception before any remote write"
+        )
 
     def push_git(self) -> None:
         self._require_available()
-        _, _, destination, _ = self._context()
-        assert self._git_head is not None
-        self._repository_readback("g11.git.pre-push")
-        self._execute(
-            "g11.git.push",
-            ["git", "-C", str(destination), "push", "--set-upstream", "origin", "main"],
-            cwd=destination,
-            mutating=True,
+        raise AdapterError(
+            "G11 Git push is not implemented; it requires independent review "
+            "of a narrow exact-argv push exception before any remote write"
         )
-        self._execute(
-            "g11.git.fetch",
-            ["git", "-C", str(destination), "fetch", "origin", "main"],
-            cwd=destination,
-        )
-        equality = self._execute(
-            "g11.git.read",
-            ["git", "-C", str(destination), "rev-parse", "HEAD", "@{upstream}"],
-            cwd=destination,
-        )
-        self._require(equality.data, "head", self._git_head, "g11.git.read")
-        self._require(equality.data, "upstream", self._git_head, "g11.git.read")
-        self._require(equality.data, "branch", "main", "g11.git.read")
-        self._evidence[Gate.PUSH] = "Git main push completed and exact HEAD == upstream read back"
 
     def push_dolt(self) -> None:
         self._require_available()
-        _, _, destination, _ = self._context()
-        result = self._execute(
-            "g11.dolt.push",
-            ["bd", "dolt", "push", "--remote", "origin"],
-            cwd=destination,
-            mutating=True,
-        )
-        self._require(result.data, "remote", "origin", "g11.dolt.push")
-        self._require(result.data, "push_complete", True, "g11.dolt.push")
-        if "Push complete." not in result.stdout:
-            raise AdapterError("Dolt push output did not contain exact 'Push complete.' evidence")
-        self._evidence[Gate.PUSH] = (
-            "Git HEAD == upstream and separate bd dolt push 'Push complete.' evidence read back"
+        raise AdapterError(
+            "G11 Dolt push is not implemented; it requires independent review "
+            "of a narrow exact-argv push exception before any remote write"
         )
 
     def read_metadata(self) -> dict[str, Any]:

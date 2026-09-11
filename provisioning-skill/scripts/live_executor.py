@@ -56,6 +56,13 @@ class LiveOperation(Enum):
     BD_SEARCH_ISSUES = "bd-search-issues"
     BD_CREATE_ISSUE = "bd-create-issue"
     BD_SHOW_ISSUE = "bd-show-issue"
+    GIT_STATUS_ALL = "git-status-all"
+    GIT_ADD_ALL = "git-add-all"
+    GIT_DIFF_CACHED_NAMES = "git-diff-cached-names"
+    GIT_DIFF_CACHED_TEXT = "git-diff-cached-text"
+    GIT_COMMIT = "git-commit"
+    GIT_REV_PARSE_HEAD = "git-rev-parse-head"
+    GIT_STATUS_BRANCH = "git-status-branch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +285,59 @@ class BdShowIssueRequest:
 
     destination: Path
     issue_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class GitStatusAllRequest:
+    """Read the checkout's full porcelain status (all files, untracked included)."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitAddAllRequest:
+    """Stage every change in the checkout (``git add --all``)."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitDiffCachedNamesRequest:
+    """List the staged file paths (name-only)."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitDiffCachedTextRequest:
+    """Read the full staged diff text for the secret scan."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitCommitRequest:
+    """Create the atomic conventional-commit atomically on the staged set.
+
+    ``message`` is the fixed provisioning commit message, re-validated here.
+    """
+
+    destination: Path
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class GitRevParseHeadRequest:
+    """Read the exact full HEAD commit SHA."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GitStatusBranchRequest:
+    """Read the post-commit porcelain status with branch/head context."""
+
+    destination: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -859,6 +919,69 @@ def _bd_show_issue_argv(request: BdShowIssueRequest) -> tuple[tuple[str, ...], P
     return ("bd", "show", request.issue_id, "--json"), destination
 
 
+def _git_checkout_destination(request: object, destination: Path) -> Path:
+    """Validate a git checkout destination (absolute, traversal-free)."""
+    if not isinstance(destination, Path) or not destination.is_absolute():
+        raise LiveExecutorError("git checkout destination must be an absolute path")
+    if ".." in destination.parts:
+        raise LiveExecutorError("git checkout destination path traversal is forbidden")
+    _reject_secret_or_unsafe_text(str(destination), "git checkout destination")
+    return destination
+
+
+def _git_status_all_argv(request: GitStatusAllRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _git_checkout_destination(request, request.destination)
+    return (
+        "git", "--no-optional-locks", "-C", str(destination),
+        "status", "--porcelain=v1", "--untracked-files=all",
+    ), destination
+
+
+def _git_add_all_argv(request: GitAddAllRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _git_checkout_destination(request, request.destination)
+    return ("git", "--no-optional-locks", "-C", str(destination), "add", "--all"), destination
+
+
+def _git_diff_cached_names_argv(request: GitDiffCachedNamesRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _git_checkout_destination(request, request.destination)
+    return (
+        "git", "--no-optional-locks", "-C", str(destination),
+        "diff", "--cached", "--name-only",
+    ), destination
+
+
+def _git_diff_cached_text_argv(request: GitDiffCachedTextRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _git_checkout_destination(request, request.destination)
+    return (
+        "git", "--no-optional-locks", "-C", str(destination),
+        "diff", "--cached",
+    ), destination
+
+
+def _git_commit_argv(request: GitCommitRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _git_checkout_destination(request, request.destination)
+    _reject_secret_or_unsafe_text(request.message, "commit message")
+    return (
+        "git", "--no-optional-locks", "-C", str(destination),
+        "commit", "-m", request.message,
+    ), destination
+
+
+def _git_rev_parse_head_argv(request: GitRevParseHeadRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _git_checkout_destination(request, request.destination)
+    return (
+        "git", "--no-optional-locks", "-C", str(destination), "rev-parse", "HEAD",
+    ), destination
+
+
+def _git_status_branch_argv(request: GitStatusBranchRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _git_checkout_destination(request, request.destination)
+    return (
+        "git", "--no-optional-locks", "-C", str(destination),
+        "status", "--porcelain=v1", "--branch",
+    ), destination
+
+
 def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path | None]:
     del request
     return (
@@ -991,6 +1114,13 @@ class ControlledLiveExecutor:
             LiveOperation.BD_SEARCH_ISSUES,
             LiveOperation.BD_CREATE_ISSUE,
             LiveOperation.BD_SHOW_ISSUE,
+            LiveOperation.GIT_STATUS_ALL,
+            LiveOperation.GIT_ADD_ALL,
+            LiveOperation.GIT_DIFF_CACHED_NAMES,
+            LiveOperation.GIT_DIFF_CACHED_TEXT,
+            LiveOperation.GIT_COMMIT,
+            LiveOperation.GIT_REV_PARSE_HEAD,
+            LiveOperation.GIT_STATUS_BRANCH,
         ):
             # Build and validate the exact argv, but do not hand it to the test
             # transport: an in-memory transport cannot perform a real clone/render
@@ -1176,6 +1306,34 @@ def _build_invocation(
         if type(parameters) is not BdShowIssueRequest:
             raise LiveExecutorError("live operation received the wrong request type")
         argv, cwd = _bd_show_issue_argv(parameters)
+    elif operation is LiveOperation.GIT_STATUS_ALL:
+        if type(parameters) is not GitStatusAllRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_status_all_argv(parameters)
+    elif operation is LiveOperation.GIT_ADD_ALL:
+        if type(parameters) is not GitAddAllRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_add_all_argv(parameters)
+    elif operation is LiveOperation.GIT_DIFF_CACHED_NAMES:
+        if type(parameters) is not GitDiffCachedNamesRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_diff_cached_names_argv(parameters)
+    elif operation is LiveOperation.GIT_DIFF_CACHED_TEXT:
+        if type(parameters) is not GitDiffCachedTextRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_diff_cached_text_argv(parameters)
+    elif operation is LiveOperation.GIT_COMMIT:
+        if type(parameters) is not GitCommitRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_commit_argv(parameters)
+    elif operation is LiveOperation.GIT_REV_PARSE_HEAD:
+        if type(parameters) is not GitRevParseHeadRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_rev_parse_head_argv(parameters)
+    elif operation is LiveOperation.GIT_STATUS_BRANCH:
+        if type(parameters) is not GitStatusBranchRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _git_status_branch_argv(parameters)
     else:  # pragma: no cover - guarded by exact enum admission above
         raise LiveExecutorError("unknown live operation")
 
