@@ -246,7 +246,18 @@ APPROVED_EXECUTOR_POLICY_VERSION = "controlled-live-executor/v1"
 # FR-014 backup ownership contract: pjbeyer:staff, dirs 0700, files 0600.
 APPROVED_BACKUP_USER = "pjbeyer"
 APPROVED_BACKUP_GROUP = "staff"
-APPROVED_COMPONENT_NAMES = frozenset(
+# FR-012 (corrected 2026-09-11): the live-installable SpecKit pack is narrowed
+# to the verifiably first-party extension only. `agent-context` is authored by
+# spec-kit-core and installs from the default catalog bundled into the `specify`
+# CLI (repository github/spec-kit), so it is pinned by the CLI release itself.
+# Every other formerly-"compatible" extension and preset is a community/unvetted
+# artifact (discovery-only catalog, third-party single-author repos) and is
+# DEFERRED to a future vet-and-pin task: no live gate may install one of them
+# before it is independently vetted to an immutable archive revision. Until
+# those pins exist, pretending they are "pinned" would be exactly the
+# supply-chain vulnerability FR-012 was written to close (F-003).
+APPROVED_COMPONENT_NAMES = frozenset({"agent-context"})
+DEFERRED_COMPONENT_NAMES = frozenset(
     {
         "verify-tasks",
         "spec-validate",

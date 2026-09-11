@@ -77,7 +77,7 @@ def configuration(
         template_source_identity=_TEMPLATE_SOURCE,
         template_tag="v0.1.3",
         resolved_template_commit=resolved_commit,
-        component_pins=pins or component_pins(),
+        component_pins=pins if pins is not None else component_pins(),
     )
 
 

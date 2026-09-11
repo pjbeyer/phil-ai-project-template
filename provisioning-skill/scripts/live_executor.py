@@ -50,6 +50,9 @@ class LiveOperation(Enum):
     BEADS_BACKUP_SYNC = "beads-backup-sync"
     BEADS_BACKUP_STATUS = "beads-backup-status"
     COVERAGE_AUDIT = "coverage-audit"
+    SPECKIT_INIT = "speckit-init"
+    SPECKIT_EXTENSION_ADD = "speckit-extension-add"
+    SPECKIT_INTEGRATION_READ = "speckit-integration-read"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +212,39 @@ class CoverageAuditRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class SpeckitInitRequest:
+    """Initialize Hermes-primary SpecKit via the current ``specify`` CLI.
+
+    The destination must be the cloned (rendered) checkout; the CLI scaffolds
+    ``.specify`` there. No hand-copied files may substitute for CLI init (FR-012).
+    The argv is fixed: `init --here --integration hermes --script sh
+    --non-interactive`.
+    """
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class SpeckitExtensionAddRequest:
+    """Install one live-approved extension via the bundled default catalog.
+
+    ``extension`` must be an exact member of the first-party allowlist
+    (``agent-context``); community/unvetted names are rejected here even if a
+    caller managed to reach this request type.
+    """
+
+    destination: Path
+    extension: str
+
+
+@dataclass(frozen=True, slots=True)
+class SpeckitIntegrationReadRequest:
+    """Read the current project's integration status as exact JSON readback."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
 class RawResult:
     """Bounded raw process fields; no caller-supplied facts or data map."""
 
@@ -285,6 +321,10 @@ _FORBIDDEN_TOKENS = frozenset(
 )
 _SHELL_METACHARACTERS = frozenset(";&|`$><\n\r")
 _BEADS_ENV_KEYS = frozenset({"BEADS_DOLT_PORT", "BEADS_DOLT_DATABASE"})
+# First-party, CLI-bundled SpecKit extension allowlist (FR-012 corrected).
+# `agent-context` is authored by spec-kit-core and installs from the default
+# catalog; community/unvetted names must never reach `specify extension add`.
+_APPROVED_SPECKIT_EXTENSIONS = frozenset({"agent-context"})
 # Floating refs must never be rendered or resolved as an immutable revision.
 _FLOATING_REFS = frozenset(
     {
@@ -673,6 +713,50 @@ def _coverage_audit_argv(request: CoverageAuditRequest) -> tuple[tuple[str, ...]
     return ("python3", str(script)), request.scripts_dir
 
 
+def _speckit_destination(request: object, destination: Path) -> Path:
+    """Validate a SpecKit destination checkout (absolute, traversal-free)."""
+    if not isinstance(destination, Path) or not destination.is_absolute():
+        raise LiveExecutorError("specify destination must be an absolute path")
+    if ".." in destination.parts:
+        raise LiveExecutorError("specify destination path traversal is forbidden")
+    _reject_secret_or_unsafe_text(str(destination), "specify destination")
+    return destination
+
+
+def _speckit_init_argv(request: SpeckitInitRequest) -> tuple[tuple[str, ...], Path]:
+    destination = _speckit_destination(request, request.destination)
+    return (
+        "specify",
+        "init",
+        "--here",
+        "--integration",
+        "hermes",
+        "--script",
+        "sh",
+        "--non-interactive",
+    ), destination
+
+
+def _speckit_extension_add_argv(
+    request: SpeckitExtensionAddRequest,
+) -> tuple[tuple[str, ...], Path]:
+    destination = _speckit_destination(request, request.destination)
+    _reject_secret_or_unsafe_text(request.extension, "specify extension")
+    # First-party allowlist only; community/unvetted names are rejected here.
+    if request.extension not in _APPROVED_SPECKIT_EXTENSIONS:
+        raise LiveExecutorError(
+            "specify extension is outside the first-party live-installable allowlist"
+        )
+    return ("specify", "extension", "add", request.extension), destination
+
+
+def _speckit_integration_read_argv(
+    request: SpeckitIntegrationReadRequest,
+) -> tuple[tuple[str, ...], Path]:
+    destination = _speckit_destination(request, request.destination)
+    return ("specify", "integration", "status", "--json"), destination
+
+
 def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path | None]:
     del request
     return (
@@ -696,7 +780,18 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
     if not 0 < invocation.timeout_seconds <= 30:
         raise LiveExecutorError("controlled invocation timeout is not bounded")
     lowered = tuple(argument.lower() for argument in invocation.argv)
-    if any(argument in _FORBIDDEN_TOKENS for argument in lowered):
+    # The fixed SpecKit init argv carries `--script sh` where "sh" is a data
+    # value selecting the scaffolded script dialect (argv[0] is ``specify``, not
+    # a shell program); it is never a shell invocation. Permit it only in that
+    # exact, module-constructed form.
+    speckit_script_value = (
+        invocation.operation is LiveOperation.SPECKIT_INIT and lowered[0] == "specify"
+    )
+    if any(
+        argument in _FORBIDDEN_TOKENS
+        and not (speckit_script_value and argument == "sh")
+        for argument in lowered
+    ):
         raise LiveExecutorError("controlled invocation contains a destructive or service-control form")
     for argument in invocation.argv:
         if not isinstance(argument, str) or "\x00" in argument:
@@ -788,6 +883,9 @@ class ControlledLiveExecutor:
             LiveOperation.BEADS_BACKUP_SYNC,
             LiveOperation.BEADS_BACKUP_STATUS,
             LiveOperation.COVERAGE_AUDIT,
+            LiveOperation.SPECKIT_INIT,
+            LiveOperation.SPECKIT_EXTENSION_ADD,
+            LiveOperation.SPECKIT_INTEGRATION_READ,
         ):
             # Build and validate the exact argv, but do not hand it to the test
             # transport: an in-memory transport cannot perform a real clone/render
@@ -949,6 +1047,18 @@ def _build_invocation(
         if type(parameters) is not CoverageAuditRequest:
             raise LiveExecutorError("live operation received the wrong request type")
         argv, cwd = _coverage_audit_argv(parameters)
+    elif operation is LiveOperation.SPECKIT_INIT:
+        if type(parameters) is not SpeckitInitRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _speckit_init_argv(parameters)
+    elif operation is LiveOperation.SPECKIT_EXTENSION_ADD:
+        if type(parameters) is not SpeckitExtensionAddRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _speckit_extension_add_argv(parameters)
+    elif operation is LiveOperation.SPECKIT_INTEGRATION_READ:
+        if type(parameters) is not SpeckitIntegrationReadRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _speckit_integration_read_argv(parameters)
     else:  # pragma: no cover - guarded by exact enum admission above
         raise LiveExecutorError("unknown live operation")
 

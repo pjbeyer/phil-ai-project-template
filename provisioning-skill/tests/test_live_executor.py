@@ -573,6 +573,9 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.BEADS_BACKUP_SYNC,
                 LiveOperation.BEADS_BACKUP_STATUS,
                 LiveOperation.COVERAGE_AUDIT,
+                LiveOperation.SPECKIT_INIT,
+                LiveOperation.SPECKIT_EXTENSION_ADD,
+                LiveOperation.SPECKIT_INTEGRATION_READ,
             },
         )
 
@@ -886,6 +889,22 @@ class ControlledLiveExecutorTests(unittest.TestCase):
             with self.subTest(operation=operation), self.assertRaises(LiveExecutorError):
                 self.executor.execute(operation, params)
 
+    def test_speckit_operations_are_fail_closed_under_test_transport(self) -> None:
+        from scripts.live_executor import (
+            SpeckitExtensionAddRequest,
+            SpeckitInitRequest,
+            SpeckitIntegrationReadRequest,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        for operation, params in (
+            (LiveOperation.SPECKIT_INIT, SpeckitInitRequest(dest)),
+            (LiveOperation.SPECKIT_EXTENSION_ADD, SpeckitExtensionAddRequest(dest, "agent-context")),
+            (LiveOperation.SPECKIT_INTEGRATION_READ, SpeckitIntegrationReadRequest(dest)),
+        ):
+            with self.subTest(operation=operation), self.assertRaises(LiveExecutorError):
+                self.executor.execute(operation, params)
+
 
 class BeadsReadbackParserTests(unittest.TestCase):
     """The adapter-owned parsers that turn raw bd --json into exact structures."""
@@ -1037,6 +1056,86 @@ class BeadsReadbackParserTests(unittest.TestCase):
         for raw in bad:
             with self.subTest(raw=raw), self.assertRaises(AdapterError):
                 _parse_dolt_backup_status_raw(raw)
+
+    def test_speckit_init_builds_exact_argv(self) -> None:
+        from scripts.live_executor import SpeckitInitRequest
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        argv, cwd = live_executor._speckit_init_argv(SpeckitInitRequest(dest))
+        self.assertEqual(
+            argv,
+            ("specify", "init", "--here", "--integration", "hermes", "--script", "sh", "--non-interactive"),
+        )
+        self.assertEqual(cwd, dest)
+
+    def test_speckit_extension_add_allowlist_rejects_community_names(self) -> None:
+        from scripts.live_executor import SpeckitExtensionAddRequest
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        # First-party only.
+        argv, cwd = live_executor._speckit_extension_add_argv(
+            SpeckitExtensionAddRequest(dest, "agent-context")
+        )
+        self.assertEqual(argv, ("specify", "extension", "add", "agent-context"))
+        self.assertEqual(cwd, dest)
+        # Deferred community names and exclusions never reach the CLI.
+        for name in ("verify-tasks", "security-review", "command-density", "jira", "verify", "review"):
+            with self.subTest(name=name), self.assertRaises(LiveExecutorError):
+                live_executor._speckit_extension_add_argv(SpeckitExtensionAddRequest(dest, name))
+
+    def test_speckit_integration_read_builds_exact_argv(self) -> None:
+        from scripts.live_executor import SpeckitIntegrationReadRequest
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        argv, cwd = live_executor._speckit_integration_read_argv(
+            SpeckitIntegrationReadRequest(dest)
+        )
+        self.assertEqual(argv, ("specify", "integration", "status", "--json"))
+        self.assertEqual(cwd, dest)
+
+    def test_speckit_operations_reject_unsafe_destination(self) -> None:
+        from scripts.live_executor import (
+            SpeckitExtensionAddRequest,
+            SpeckitInitRequest,
+            SpeckitIntegrationReadRequest,
+        )
+
+        for op in (
+            lambda d: live_executor._speckit_init_argv(SpeckitInitRequest(d)),
+            lambda d: live_executor._speckit_extension_add_argv(SpeckitExtensionAddRequest(d, "agent-context")),
+            lambda d: live_executor._speckit_integration_read_argv(SpeckitIntegrationReadRequest(d)),
+        ):
+            for dest in (Path("relative/path"), Path("/tmp/../escape")):
+                with self.subTest(dest=dest), self.assertRaises(LiveExecutorError):
+                    op(dest)
+
+    def test_parse_speckit_integration_raw_accepts_hermes_and_rejects_drift(self) -> None:
+        from scripts.adapters import AdapterError, _parse_speckit_integration_raw
+
+        good = (
+            '{"status":"ok","default_integration":"hermes",'
+            '"installed_integrations":["hermes"],'
+            '"recorded_installed_integrations":["hermes"],'
+            '"manifest_checked_integrations":["hermes","speckit"],'
+            '"multi_install_safe":true,"shared_templates_target_alignment":"hermes",'
+            '"missing_managed_files":0,"modified_managed_files":0,'
+            '"invalid_manifest_paths":0,"unchecked_manifests":0,'
+            '"manifests":{},"findings":[]}'
+        )
+        parsed = _parse_speckit_integration_raw(good)
+        self.assertEqual(parsed["default_integration"], "hermes")
+
+        bad = (
+            "[]",
+            '{"status":"ok"}',
+            '{"status":"error","default_integration":"hermes","installed_integrations":["hermes"],"findings":[],"missing_managed_files":0,"modified_managed_files":0}',
+            '{"status":"ok","default_integration":"copilot","installed_integrations":["copilot"],"findings":[],"missing_managed_files":0,"modified_managed_files":0}',
+            '{"status":"ok","default_integration":"hermes","installed_integrations":["hermes"],"findings":["x"],"missing_managed_files":0,"modified_managed_files":0}',
+            '{"status":"ok","default_integration":"hermes","installed_integrations":["hermes"],"findings":[],"missing_managed_files":1,"modified_managed_files":0}',
+        )
+        for raw in bad:
+            with self.subTest(raw=raw), self.assertRaises(AdapterError):
+                _parse_speckit_integration_raw(raw)
 
 
 if __name__ == "__main__":

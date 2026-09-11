@@ -219,7 +219,7 @@ class ResumeInspectionTests(unittest.TestCase):
                 "missing SpecKit component",
                 Gate.SPECKIT,
                 lambda data: data[Gate.SPECKIT].update(
-                    components=sorted(APPROVED_COMPONENT_NAMES - {"security-review"})
+                    components=sorted(APPROVED_COMPONENT_NAMES - {"agent-context"})
                 ),
             ),
             (

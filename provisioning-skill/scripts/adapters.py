@@ -45,6 +45,9 @@ from .live_executor import (
     GitRemoteReadbackRequest,
     GitTemplateRevisionRequest,
     LiveOperation,
+    SpeckitExtensionAddRequest,
+    SpeckitInitRequest,
+    SpeckitIntegrationReadRequest,
 )
 from .production_transport import make_production_executor
 from .manifest import ManifestError, append_record, load_manifest, validate_records
@@ -59,7 +62,10 @@ from .models import (
     configuration_digest,
 )
 from .preflight import ParsedOrigin
-from .speckit import COMPATIBLE_EXTENSIONS, COMPATIBLE_PRESETS, EXCLUDED, init_command
+from .speckit import (
+    COMPATIBLE_EXTENSIONS,
+    COMPATIBLE_PRESETS,
+)
 
 
 class AdapterError(RuntimeError):
@@ -1660,6 +1666,37 @@ def _parse_dolt_backup_status_raw(raw: str) -> dict[str, Any]:
     return dict(dolt)
 
 
+def _parse_speckit_integration_raw(raw: str) -> dict[str, Any]:
+    """Parse ``specify integration status --json`` into the exact fields.
+
+    The CLI emits ``{"status","default_integration","installed_integrations",
+    "recorded_installed_integrations","manifest_checked_integrations",
+    "multi_install_safe","shared_templates_target_alignment",
+    "missing_managed_files","modified_managed_files","invalid_manifest_paths",
+    "unchecked_manifests","manifests","findings"}``. Only the minimal verified
+    subset is returned; unknown or missing shape is a mismatch.
+    """
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("SpecKit integration readback was not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise AdapterError("SpecKit integration readback was not a JSON object")
+    if payload.get("status") != "ok":
+        raise AdapterError("SpecKit integration readback did not report ok status")
+    if payload.get("default_integration") != "hermes":
+        raise AdapterError("SpecKit integration readback is not Hermes-primary")
+    installed = payload.get("installed_integrations")
+    if not isinstance(installed, list) or "hermes" not in installed:
+        raise AdapterError("SpecKit integration readback omitted the installed Hermes integration")
+    findings = payload.get("findings")
+    if findings != []:
+        raise AdapterError("SpecKit integration readback reported findings")
+    if payload.get("missing_managed_files") != 0 or payload.get("modified_managed_files") != 0:
+        raise AdapterError("SpecKit integration readback reported modified or missing managed files")
+    return dict(payload)
+
+
 class LiveAdapter:
     """Rejected G01-G11 draft; unavailable pending supervised replacement.
 
@@ -2380,66 +2417,51 @@ class LiveAdapter:
         )
 
     def _g08(self) -> None:
-        _, _, destination, config = self._context()
+        _, _, destination, _ = self._context()
         if (destination / ".specify").exists():
             raise AdapterError("existing .specify state forbids SpecKit initialization")
-        self._execute("g08.init", init_command(), cwd=destination, mutating=True)
+        executor = self._production_executor()
+        # Hermes-primary CLI initialization; no hand-copied files substitute (FR-012).
+        init = executor.execute(
+            LiveOperation.SPECKIT_INIT,
+            SpeckitInitRequest(destination),
+        )
+        if init.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", init.stderr or init.stdout or "no diagnostic")
+            raise AdapterError(f"g08.init failed with exit {init.returncode}: {detail[:500]}")
+        if not (destination / ".specify" / "integration.json").exists():
+            raise AdapterError("SpecKit init did not produce the exact integration state file")
+        # Live-installable first-party pack only (FR-012 corrected). Each name is
+        # re-admitted against the executor allowlist; deferrals and exclusions
+        # never reach a CLI invocation.
         for name in COMPATIBLE_EXTENSIONS:
-            pin = config.extension_pins[name]
-            self._execute(
-                f"g08.extension.add.{name}",
-                ["specify", "extension", "add", name, "--from", pin.source],
-                cwd=destination,
-                mutating=True,
+            add = executor.execute(
+                LiveOperation.SPECKIT_EXTENSION_ADD,
+                SpeckitExtensionAddRequest(destination, name),
             )
-        for name in COMPATIBLE_PRESETS:
-            pin = config.preset_pins[name]
-            self._execute(
-                f"g08.preset.add.{name}",
-                ["specify", "preset", "add", name, "--from", pin.source],
-                cwd=destination,
-                mutating=True,
-            )
+            if add.returncode != 0:
+                detail = _SECRET.sub("[REDACTED]", add.stderr or add.stdout or "no diagnostic")
+                raise AdapterError(f"g08.extension.add.{name} failed with exit {add.returncode}: {detail[:500]}")
+        # No live-installable presets exist (COMPATIBLE_PRESETS is empty); the
+        # formerly-approved presets are deferred pending a vet-and-pin task.
+        if COMPATIBLE_PRESETS:
+            raise AdapterError("live SpecKit presets are not approved for install")
         constitution = destination / ".specify" / "memory" / "constitution.md"
         constitution.parent.mkdir(parents=True, exist_ok=True)
         constitution.write_text(_CONSTITUTION, encoding="utf-8")
-        integration = self._execute(
-            "g08.integration.read",
-            ["specify", "integration", "status", "--json"],
-            cwd=destination,
+        integration = executor.execute(
+            LiveOperation.SPECKIT_INTEGRATION_READ,
+            SpeckitIntegrationReadRequest(destination),
         )
-        self._require(integration.data, "integration", "hermes", "g08.integration.read")
-        extensions = self._execute(
-            "g08.extensions.read", ["specify", "extension", "list"], cwd=destination
-        )
-        expected_extensions = [
-            {
-                "name": name,
-                "source": config.extension_pins[name].source,
-                "revision": config.extension_pins[name].revision,
-                "enabled": True,
-            }
-            for name in COMPATIBLE_EXTENSIONS
-        ]
-        self._require(extensions.data, "extensions", expected_extensions, "g08.extensions.read")
-        presets = self._execute(
-            "g08.presets.read", ["specify", "preset", "list"], cwd=destination
-        )
-        expected_presets = [
-            {
-                "name": name,
-                "source": config.preset_pins[name].source,
-                "revision": config.preset_pins[name].revision,
-                "enabled": True,
-            }
-            for name in COMPATIBLE_PRESETS
-        ]
-        self._require(presets.data, "presets", expected_presets, "g08.presets.read")
-        installed = {item["name"] for item in expected_extensions + expected_presets}
-        if installed & set(EXCLUDED):
-            raise AdapterError("excluded SpecKit component was installed")
+        if integration.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", integration.stderr or integration.stdout or "no diagnostic")
+            raise AdapterError(f"g08.integration.read failed with exit {integration.returncode}: {detail[:500]}")
+        _parse_speckit_integration_raw(integration.stdout)
+        # Deferred/excluded component names must be recorded, never installed.
+        # A live gate may install only the first-party allowlist.
         self._evidence[Gate.SPECKIT] = (
-            "Hermes-primary CLI init, exact immutable extension/preset revisions, exclusions, and constitution read back"
+            "Hermes-primary CLI init, first-party agent-context extension, focused constitution, "
+            "and integration status read back; community/deferred pack left uninstalled pending vet-pin"
         )
 
     def _g09(self) -> None:
