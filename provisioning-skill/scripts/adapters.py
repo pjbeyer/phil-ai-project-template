@@ -43,6 +43,7 @@ from .live_executor import (
     BeadsSetupRequest,
     CopierRenderRequest,
     CoverageAuditRequest,
+    CentralDoltProbeRequest,
     DoltRemoteAddRequest,
     DoltRemoteListRequest,
     GitAddAllRequest,
@@ -52,6 +53,7 @@ from .live_executor import (
     GitDiffCachedTextRequest,
     GitLsRemoteMainRequest,
     GitPushRequest,
+    GitRemotePreflightRequest,
     GitRemoteReadbackRequest,
     GitRevParseHeadRequest,
     GitStatusAllRequest,
@@ -1789,6 +1791,36 @@ def _parse_git_ls_remote_main(raw: str) -> str:
     return sha
 
 
+def _parse_central_dolt_probe(raw: str) -> None:
+    """Parse ``dolt ... sql -r json -q "SELECT 1 AS ok;"`` into the exact row.
+
+    The live server answers ``{"rows":[{"ok":"1"}]}`` (the value is a JSON
+    string). Any other shape is a reachability/identity failure, never elided.
+    """
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("central Dolt probe output was not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise AdapterError("central Dolt probe output was not a JSON object")
+    if payload.get("rows") != [{"ok": "1"}]:
+        raise AdapterError("central Dolt probe did not return the exact SELECT 1 row")
+
+
+def _parse_git_ls_remote_empty(raw: str) -> None:
+    """Verify a ``git ls-remote --symref <origin> HEAD`` reports no commits.
+
+    A credential-free empty origin yields only an optional symref header line
+    (``ref: refs/heads/main\tHEAD``); any line whose first field is a full 40-hex
+    SHA means the origin already carries refs and must stop the run before the
+    clone boundary.
+    """
+    for line in (line for line in raw.splitlines() if line.strip()):
+        first = line.split("\t", 1)[0].strip()
+        if _SHA.fullmatch(first):
+            raise AdapterError("origin already carries refs; an empty origin is required")
+
+
 class LiveAdapter:
     """Rejected G01-G11 draft; unavailable pending supervised replacement.
 
@@ -1936,30 +1968,35 @@ class LiveAdapter:
             )
 
     def _origin_probe(self, operation: str) -> None:
-        request, origin, _, _ = self._context()
-        result = self._execute(
-            operation,
-            ["git", "ls-remote", "--symref", request.origin_url, "HEAD"],
+        request, _, _, _ = self._context()
+        executor = self._production_executor()
+        probe = executor.execute(
+            LiveOperation.GIT_REMOTE_PREFLIGHT,
+            GitRemotePreflightRequest(request.origin_url),
         )
-        self._require(result.data, "identity", origin.identity, operation)
-        self._require(result.data, "remote_url", request.origin_url, operation)
-        self._require(result.data, "empty", True, operation)
-        self._require(result.data, "writable", True, operation)
+        if probe.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", probe.stderr or probe.stdout or "no diagnostic")
+            raise AdapterError(f"{operation} failed with exit {probe.returncode}: {detail[:500]}")
+        # A credential-free empty origin emits no commit SHA; any full 40-hex SHA
+        # in the symref output means the origin already carries refs (FR-007).
+        _parse_git_ls_remote_empty(probe.stdout)
 
     def _repository_readback(self, operation: str, *, empty: bool | None = None) -> Mapping[str, Any]:
-        request, origin, destination, _ = self._context()
-        result = self._execute(
-            operation,
-            ["git", "-C", str(destination), "status", "--porcelain=v1", "--branch"],
-            cwd=destination,
+        _, _, destination, _ = self._context()
+        executor = self._production_executor()
+        status = executor.execute(
+            LiveOperation.GIT_STATUS_BRANCH,
+            GitStatusBranchRequest(destination),
         )
-        self._require(result.data, "identity", origin.identity, operation)
-        self._require(result.data, "origin_url", request.origin_url, operation)
-        self._require(result.data, "root", str(destination), operation)
-        self._require(result.data, "branch", "main", operation)
-        if empty is not None:
-            self._require(result.data, "empty_checkout", empty, operation)
-        return result.data
+        if status.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", status.stderr or status.stdout or "no diagnostic")
+            raise AdapterError(f"{operation} failed with exit {status.returncode}: {detail[:500]}")
+        parsed = _parse_git_porcelain_branch(status.stdout)
+        if parsed["branch"] != "main":
+            raise AdapterError(f"{operation} checkout is not on main")
+        if empty is True and not parsed["clean"]:
+            raise AdapterError(f"{operation} expected a clean empty checkout")
+        return dict(parsed)
 
     def _assert_destination_absent(self) -> None:
         _, _, destination, _ = self._context()
@@ -2030,26 +2067,22 @@ class LiveAdapter:
         return self._evidence.get(gate, f"{gate} passed mandatory structured readback")
 
     def _g01(self) -> None:
-        request, _, _, _ = self._context()
+        _, _, destination, _ = self._context()
         self._assert_destination_absent()
         self._assert_manifest_available(require_absent=True)
         self._origin_probe("g01.origin.read")
-        result = self._execute(
-            "g01.dolt.read",
-            [
-                "dolt", "--host", "127.0.0.1", "--port", "3307", "sql",
-                "-r", "json", "-q", "SELECT 1 AS ok;",
-            ],
+        executor = self._production_executor()
+        probe = executor.execute(
+            LiveOperation.CENTRAL_DOLT_PROBE,
+            CentralDoltProbeRequest(),
         )
-        for key, expected in (
-            ("host", "127.0.0.1"), ("port", 3307), ("reachable", True),
-            ("sole_approved_service", True),
-        ):
-            self._require(result.data, key, expected, "g01.dolt.read")
-        self._require(result.data, "prefix_available", request.beads_prefix, "g01.dolt.read")
+        if probe.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", probe.stderr or probe.stdout or "no diagnostic")
+            raise AdapterError(f"g01.dolt.read failed with exit {probe.returncode}: {detail[:500]}")
+        _parse_central_dolt_probe(probe.stdout)
         self._evidence[Gate.PREFLIGHT] = (
-            "exact origin, empty/writable route, canonical absent destination, prefix, tools, "
-            "manifest, and approved 127.0.0.1:3307 service read back"
+            "canonical absent destination, empty/writable origin, approved central Dolt "
+            "127.0.0.1:3307 reachability, and manifest/authorization read back"
         )
 
     def _g02(self) -> None:
@@ -2794,21 +2827,16 @@ class LiveAdapter:
 
     def verify_existing(self) -> bool:
         self._require_available()
-        request, origin, destination, _ = self._context()
-        result = self._execute(
-            "existing.read",
-            ["git", "-C", str(destination), "status", "--porcelain=v1", "--branch"],
-            cwd=destination,
+        _, _, destination, _ = self._context()
+        executor = self._production_executor()
+        status = executor.execute(
+            LiveOperation.GIT_STATUS_BRANCH,
+            GitStatusBranchRequest(destination),
         )
-        expected = {
-            "complete": True,
-            "identity": origin.identity,
-            "origin_url": request.origin_url,
-            "destination": str(destination),
-            "gates": [str(gate) for gate in Gate],
-            "git_sync": "succeeded",
-            "dolt_sync": "succeeded",
-        }
-        for key, value in expected.items():
-            self._require(result.data, key, value, "existing.read")
+        if status.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", status.stderr or status.stdout or "no diagnostic")
+            raise AdapterError(f"verify_existing failed with exit {status.returncode}: {detail[:500]}")
+        parsed = _parse_git_porcelain_branch(status.stdout)
+        if parsed["branch"] != "main" or not parsed["clean"]:
+            raise AdapterError("existing checkout did not read back as a clean main checkout")
         return True

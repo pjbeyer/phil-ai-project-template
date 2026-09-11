@@ -189,7 +189,7 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         self.assertEqual(
             request.argv,  # type: ignore[attr-defined]
             (
-                "dolt", "--host", "127.0.0.1", "--port", "3307", "sql",
+                "dolt", "--host", "127.0.0.1", "--port", "3307", "--no-tls", "sql",
                 "-r", "json", "-q", "SELECT 1 AS ok;",
             ),
         )
@@ -1361,6 +1361,32 @@ class BeadsReadbackParserTests(unittest.TestCase):
         ):
             with self.subTest(raw=bad), self.assertRaises(AdapterError):
                 _parse_git_ls_remote_main(bad)
+
+    def test_parse_central_dolt_probe(self) -> None:
+        from scripts.adapters import AdapterError, _parse_central_dolt_probe
+
+        _parse_central_dolt_probe('{"rows": [{"ok": "1"}]}')
+        for bad in (
+            "",
+            "not json",
+            "[]",
+            '{"rows": []}',
+            '{"rows": [{"ok": 1}]}',
+            '{"rows": [{"ok": "0"}]}',
+            '{"rows": [{"ok": "1"}, {"ok": "2"}]}',
+        ):
+            with self.subTest(raw=bad), self.assertRaises(AdapterError):
+                _parse_central_dolt_probe(bad)
+
+    def test_parse_git_ls_remote_empty(self) -> None:
+        from scripts.adapters import AdapterError, _parse_git_ls_remote_empty
+
+        # Empty origin: only a symref header line, no commit SHA.
+        _parse_git_ls_remote_empty("ref: refs/heads/main\tHEAD\n")
+        _parse_git_ls_remote_empty("")
+        # Non-empty origin carries a full SHA and must be rejected.
+        with self.assertRaises(AdapterError):
+            _parse_git_ls_remote_empty("a" * 40 + "\tHEAD\n")
 
 
 if __name__ == "__main__":

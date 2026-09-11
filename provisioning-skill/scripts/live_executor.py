@@ -1040,6 +1040,7 @@ def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path 
         "127.0.0.1",
         "--port",
         "3307",
+        "--no-tls",
         "sql",
         "-r",
         "json",

@@ -35,7 +35,7 @@ class _FakeCompleted:
 def _invocation(**overrides: object) -> _TransportInvocation:
     base = dict(
         operation=LiveOperation.CENTRAL_DOLT_PROBE,
-        argv=("dolt", "--host", "127.0.0.1", "--port", "3307", "sql", "-r", "json", "-q", "SELECT 1 AS ok;"),
+        argv=("dolt", "--host", "127.0.0.1", "--port", "3307", "--no-tls", "sql", "-r", "json", "-q", "SELECT 1 AS ok;"),
         cwd=None,
         env={"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": "/var/empty"},
         timeout_seconds=15,
