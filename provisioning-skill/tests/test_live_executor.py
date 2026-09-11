@@ -863,5 +863,63 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         )
 
 
+class BeadsReadbackParserTests(unittest.TestCase):
+    """The adapter-owned parsers that turn raw bd --json into exact structures."""
+
+    def test_parse_beads_prefix_raw_returns_value_only(self) -> None:
+        from scripts.adapters import AdapterError, _parse_beads_prefix_raw
+
+        raw = '{\n  "key": "issue_prefix",\n  "schema_version": 1,\n  "value": "pjb"\n}\n'
+        self.assertEqual(_parse_beads_prefix_raw(raw), "pjb")
+
+    def test_parse_beads_prefix_raw_rejects_wrong_key_and_non_object(self) -> None:
+        from scripts.adapters import AdapterError, _parse_beads_prefix_raw
+
+        for raw in ("pjb", "[1,2]", '{"value":"pjb"}', '{"key":"other","value":"pjb"}'):
+            with self.subTest(raw=raw), self.assertRaises(AdapterError):
+                _parse_beads_prefix_raw(raw)
+
+    def test_parse_dolt_remotes_raw_extracts_name_url_pairs(self) -> None:
+        from scripts.adapters import AdapterError, _parse_dolt_remotes_raw
+
+        empty = _parse_dolt_remotes_raw("[]\n")
+        self.assertEqual(empty, [])
+        populated = _parse_dolt_remotes_raw(
+            '[{"name":"origin","url":"git+https://github.com/pjbeyer/demo.git",'
+            '"sql_url":"git+https://github.com/pjbeyer/demo.git","status":"ok"}]\n'
+        )
+        self.assertEqual(
+            populated,
+            [{"name": "origin", "url": "git+https://github.com/pjbeyer/demo.git"}],
+        )
+
+    def test_parse_dolt_remotes_raw_rejects_non_array_and_missing_keys(self) -> None:
+        from scripts.adapters import AdapterError, _parse_dolt_remotes_raw
+
+        for raw in ("{}", '[{"name":"origin"}]', '[{"url":"x"}]', '["origin"]', "null"):
+            with self.subTest(raw=raw), self.assertRaises(AdapterError):
+                _parse_dolt_remotes_raw(raw)
+
+    def test_parse_beads_hooks_raw_extracts_installed_flags(self) -> None:
+        from scripts.adapters import AdapterError, _parse_beads_hooks_raw
+
+        raw = (
+            '{"hooks":[{"Name":"pre-commit","Installed":true,"Version":"1.1.0",'
+            '"IsShim":true,"Outdated":false},{"Name":"post-merge","Installed":true,'
+            '"Version":"1.1.0","IsShim":true,"Outdated":false}]}\n'
+        )
+        self.assertEqual(
+            _parse_beads_hooks_raw(raw),
+            {"pre-commit": True, "post-merge": True},
+        )
+
+    def test_parse_beads_hooks_raw_rejects_malformed_input(self) -> None:
+        from scripts.adapters import AdapterError, _parse_beads_hooks_raw
+
+        for raw in ("[]", '{"hooks":[]"extra"}', '{"hooks":"notalist"}', '{"hooks":[{"Name":"x"}]}'):
+            with self.subTest(raw=raw), self.assertRaises(AdapterError):
+                _parse_beads_hooks_raw(raw)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

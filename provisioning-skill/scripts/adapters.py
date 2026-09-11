@@ -1561,6 +1561,78 @@ def validate_command_spec(spec: CommandSpec, coverage_script: Path | None = None
         raise AdapterError("stale Beads Dolt overrides must be absent from Beads commands")
 
 
+def _parse_beads_prefix_raw(raw: str) -> str:
+    """Parse ``bd config get issue_prefix --json`` into its scalar value.
+
+    The command emits a JSON object ``{"key","schema_version","value"}``, not a
+    bare scalar. Return only the ``value`` field; anything else is a mismatch.
+    """
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("Beads issue prefix readback was not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise AdapterError("Beads issue prefix readback was not a JSON object")
+    if payload.get("key") != "issue_prefix":
+        raise AdapterError("Beads issue prefix readback carried the wrong config key")
+    value = payload.get("value")
+    if not isinstance(value, str) or not value:
+        raise AdapterError("Beads issue prefix readback omitted a plain-string value")
+    return value
+
+
+def _parse_dolt_remotes_raw(raw: str) -> list[dict[str, str]]:
+    """Parse ``bd dolt remote list --json`` into a list of {name, url} records.
+
+    The command emits ``[{"name","url","sql_url","status",...}]``. Return only the
+    exact ``name``/``url`` pair per record; extra or missing keys are a mismatch.
+    """
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("Dolt remote readback was not valid JSON") from exc
+    if not isinstance(payload, list):
+        raise AdapterError("Dolt remote readback was not a JSON array")
+    remotes: list[dict[str, str]] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            raise AdapterError("Dolt remote readback contained a non-object entry")
+        name = entry.get("name")
+        url = entry.get("url")
+        if not isinstance(name, str) or not isinstance(url, str):
+            raise AdapterError("Dolt remote readback omitted a name or url")
+        remotes.append({"name": name, "url": url})
+    return remotes
+
+
+def _parse_beads_hooks_raw(raw: str) -> dict[str, bool]:
+    """Parse ``bd hooks list --json`` into a {hook_name: Installed} map.
+
+    The command emits ``{"hooks":[{"Name","Installed","Version","IsShim",
+    "Outdated"},...]}`` with capital keys. Return name -> installed; anything
+    outside the approved hook set is still surfaced so the caller can reject it.
+    """
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("Beads hooks readback was not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise AdapterError("Beads hooks readback was not a JSON object")
+    entries = payload.get("hooks")
+    if not isinstance(entries, list):
+        raise AdapterError("Beads hooks readback omitted a hooks array")
+    status: dict[str, bool] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise AdapterError("Beads hooks readback contained a non-object entry")
+        name = entry.get("Name")
+        installed = entry.get("Installed")
+        if not isinstance(name, str) or not isinstance(installed, bool):
+            raise AdapterError("Beads hooks readback omitted a name or Installed flag")
+        status[name] = installed
+    return status
+
+
 class LiveAdapter:
     """Rejected G01-G11 draft; unavailable pending supervised replacement.
 
@@ -1919,9 +1991,10 @@ class LiveAdapter:
         if prefix.returncode != 0:
             detail = _SECRET.sub("[REDACTED]", prefix.stderr or prefix.stdout or "no diagnostic")
             raise AdapterError(f"g04.prefix.read failed with exit {prefix.returncode}: {detail[:500]}")
-        # The prefix readback is a JSON scalar; parse and verify it equals the
-        # requested prefix (never substitute the prefix for the read value).
-        prefix_value = prefix.stdout.strip()
+        # The prefix readback is a JSON object; parse its value and verify it
+        # equals the requested prefix (never substitute the prefix for the read
+        # value, never accept a partial string match).
+        prefix_value = _parse_beads_prefix_raw(prefix.stdout)
         if prefix_value != request.beads_prefix:
             raise AdapterError("Beads issue prefix readback does not match the requested prefix")
         self._metadata = metadata
@@ -1946,8 +2019,9 @@ class LiveAdapter:
         if before.returncode != 0:
             detail = _SECRET.sub("[REDACTED]", before.stderr or before.stdout or "no diagnostic")
             raise AdapterError(f"g05.remote.before failed with exit {before.returncode}: {detail[:500]}")
-        # The before-state must show no remotes (empty list).
-        if before.stdout.strip() not in ("", "[]"):
+        # The before-state must show no remotes (exact empty list).
+        before_remotes = _parse_dolt_remotes_raw(before.stdout)
+        if before_remotes != []:
             raise AdapterError("g05.remote.before must show no existing Dolt remotes")
         add = executor.execute(
             LiveOperation.DOLT_REMOTE_ADD,
@@ -1963,7 +2037,8 @@ class LiveAdapter:
         if after.returncode != 0:
             detail = _SECRET.sub("[REDACTED]", after.stderr or after.stdout or "no diagnostic")
             raise AdapterError(f"g05.remote.read failed with exit {after.returncode}: {detail[:500]}")
-        if expected_remote not in after.stdout:
+        after_remotes = _parse_dolt_remotes_raw(after.stdout)
+        if after_remotes != [{"name": "origin", "url": expected_remote}]:
             raise AdapterError("g05.remote.read did not show the exact added origin remote")
         for integration in ("claude", "codex"):
             setup = executor.execute(
@@ -1994,9 +2069,13 @@ class LiveAdapter:
         if hooks.returncode != 0:
             detail = _SECRET.sub("[REDACTED]", hooks.stderr or hooks.stdout or "no diagnostic")
             raise AdapterError(f"g05.hooks.read failed with exit {hooks.returncode}: {detail[:500]}")
-        for hook in ("post-checkout", "post-merge", "pre-commit", "pre-push", "prepare-commit-msg"):
-            if hook not in hooks.stdout:
-                raise AdapterError(f"g05.hooks.read omitted managed hook {hook}")
+        hook_status = _parse_beads_hooks_raw(hooks.stdout)
+        expected_hooks = ("post-checkout", "post-merge", "pre-commit", "pre-push", "prepare-commit-msg")
+        if tuple(sorted(hook_status)) != expected_hooks:
+            raise AdapterError("g05.hooks.read did not match the exact managed hook set")
+        for hook in expected_hooks:
+            if hook_status[hook] is not True:
+                raise AdapterError(f"g05.hooks.read showed managed hook {hook} as not installed")
         self._evidence[Gate.BEADS_REMOTE] = (
             "credential-free HTTPS Dolt origin, Claude/Codex setup, and exact managed hooks read back"
         )
