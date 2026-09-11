@@ -174,6 +174,30 @@ def _approved_template_source() -> Path:
         ) from error
 
 
+_MANIFEST_FILENAME = "beads_cron_manifest.json"
+
+
+def _approved_manifest_path() -> Path:
+    """Resolve the shared managed-project manifest path, fail-closed if missing.
+
+    FR-013 names ``~/.hermes/scripts/beads_cron_manifest.json``. Per FR-027 /
+    NFR-007 the skill never hard-codes a workstation ``~`` path, so the Hermes
+    home root is derived at runtime: ``HERMES_HOME`` when set, otherwise
+    ``Path.home() / ".hermes"``. The file name and ``scripts`` subdirectory are
+    policy, not workstation state. The resolved path must be an exact canonical
+    absolute path.
+    """
+    home = os.environ.get("HERMES_HOME")
+    base = Path(home) if home else (Path.home() / ".hermes")
+    candidate = base / "scripts" / _MANIFEST_FILENAME
+    try:
+        return _canonical_absolute_path(candidate, "managed-project manifest")
+    except ConfigurationError as error:
+        raise ConfigurationError(
+            "managed-project manifest must resolve to an exact canonical absolute path"
+        ) from error
+
+
 APPROVED_TEMPLATE_SOURCE_IDENTITIES = frozenset({"pjbeyer/phil-ai-project-template"})
 APPROVED_TEMPLATE_MINIMUM_TAG = "v0.1.3"
 APPROVED_MANIFEST_IDENTITY = "managed-projects-manifest/v1"

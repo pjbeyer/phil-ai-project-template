@@ -1811,10 +1811,13 @@ class LiveAdapter:
             raise AdapterError("destination changed or became occupied before clone")
 
     def _assert_manifest_available(self, *, require_absent: bool) -> tuple[dict[str, Any], str]:
-        request, _, destination, config = self._context()
+        from .models import _approved_manifest_path
+
+        request, _, destination, _config = self._context()
+        manifest_path = _approved_manifest_path()
         metadata_database = self._metadata["dolt_database"] if require_absent and self._metadata else None
         try:
-            manifest, digest = load_manifest(config.manifest_path)
+            manifest, digest = load_manifest(manifest_path)
             records = manifest["repositories"]
             validate_records(records)
         except (OSError, KeyError, ManifestError) as exc:
@@ -2095,8 +2098,12 @@ class LiveAdapter:
         )
 
     def append_manifest(self, record: dict[str, Any]) -> None:
+        from .manifest import manifest_owner_for
+        from .models import _approved_manifest_path
+
         self._require_available()
-        request, _, destination, config = self._context()
+        request, _, destination, _config = self._context()
+        manifest_path = _approved_manifest_path()
         metadata = self.read_metadata()
         exact = {
             "path": str(destination),
@@ -2111,11 +2118,18 @@ class LiveAdapter:
         for key, expected in exact.items():
             if record.get(key) != expected:
                 raise AdapterError(f"manifest record {key} does not match authoritative readback")
+        # The record arrives carrying the GitHub owner identity; map it to the
+        # manifest owner vocabulary (pjbeyer -> personal, flexapp -> work) before
+        # strict new-record validation and the compare-and-append.
+        raw_owner = record.get("owner")
+        if type(raw_owner) is not str:
+            raise AdapterError("manifest record owner is not an approved owner identity")
+        record = {**record, "owner": manifest_owner_for(raw_owner)}
         try:
             # Recheck under the append helper's lock immediately before its
             # conflict-safe atomic addition. Existing records use compatibility
             # validation; this candidate uses strict new-enrollment validation.
-            committed = append_record(config.manifest_path, record)
+            committed = append_record(manifest_path, record)
             manifest = committed.manifest
             validate_records(manifest["repositories"])
         except (OSError, KeyError, ManifestError) as exc:

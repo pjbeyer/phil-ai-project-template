@@ -335,6 +335,24 @@ class ImmutableConfigurationTests(unittest.TestCase):
                 _approved_template_source(), Path(f"{_SYNTHETIC_HOME}/template")
             )
 
+    def test_approved_manifest_path_resolution_uses_hermes_home_then_fallback(self) -> None:
+        from scripts.models import _approved_manifest_path
+
+        # HERMES_HOME is authoritative for the manifest location.
+        with patch.dict("os.environ", {"HERMES_HOME": f"{_SYNTHETIC_HOME}/.hermes"}, clear=True):
+            self.assertEqual(
+                _approved_manifest_path(),
+                Path(f"{_SYNTHETIC_HOME}/.hermes/scripts/beads_cron_manifest.json"),
+            )
+        # Without HERMES_HOME, fall back to the operator's HOME/.hermes.
+        with patch.dict("os.environ", {}, clear=True), patch.object(
+            Path, "home", return_value=Path(_SYNTHETIC_HOME)
+        ):
+            self.assertEqual(
+                _approved_manifest_path(),
+                Path(f"{_SYNTHETIC_HOME}/.hermes/scripts/beads_cron_manifest.json"),
+            )
+
     def test_config_rejects_secret_patterns_pointers_tokenized_urls_and_private_paths(self) -> None:
         rejected_sources = (
             "op://SyntheticVault/SyntheticItem/SyntheticField",
