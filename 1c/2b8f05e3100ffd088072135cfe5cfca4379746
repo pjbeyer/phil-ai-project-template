@@ -1,0 +1,54 @@
+provisioning-skill/scripts/adapters.py
+  h_c5be3b3dad7ca8 256,617,916-918,957,1344,2035
+provisioning-skill/scripts/bootstrap_issues.py
+  h_c5be3b3dad7ca8 21-22
+provisioning-skill/scripts/evidence.py
+  h_c5be3b3dad7ca8 249
+provisioning-skill/scripts/live_executor.py
+  h_c5be3b3dad7ca8 475
+provisioning-skill/scripts/manifest.py
+  h_c5be3b3dad7ca8 23-24,26-27,30-33,59,152-155,209-212
+provisioning-skill/scripts/models.py
+  h_c5be3b3dad7ca8 18-22,288,474,487-488,494,1041
+provisioning-skill/scripts/preflight.py
+  h_c5be3b3dad7ca8 12,14-15,77-78
+provisioning-skill/scripts/provision_project.py
+  h_c5be3b3dad7ca8 383-384,913,1129,1233-1234,1240-1245
+provisioning-skill/scripts/vocabulary.py
+  h_c5be3b3dad7ca8 1-60
+provisioning-skill/tests/test_controlled_g07.py
+  h_c5be3b3dad7ca8 53-54
+provisioning-skill/tests/test_controlled_g09.py
+  h_c5be3b3dad7ca8 59-60
+provisioning-skill/tests/test_controlled_g10.py
+  h_c5be3b3dad7ca8 59-60
+provisioning-skill/tests/test_controlled_g11.py
+  h_c5be3b3dad7ca8 61-62
+provisioning-skill/tests/test_controlled_manifest.py
+  h_c5be3b3dad7ca8 43-44
+provisioning-skill/tests/test_live_authorization.py
+  h_c5be3b3dad7ca8 648,689
+provisioning-skill/tests/test_live_gates.py
+  h_c5be3b3dad7ca8 148,1281
+provisioning-skill/tests/test_manifest_compatibility.py
+  h_c5be3b3dad7ca8 42-43
+provisioning-skill/tests/test_manifest_contract.py
+  h_c5be3b3dad7ca8 18-20
+provisioning-skill/tests/test_preflight.py
+  h_c5be3b3dad7ca8 29-57
+provisioning-skill/tests/test_render_provenance.py
+  h_c5be3b3dad7ca8 96
+provisioning-skill/tests/test_vocabulary_visibility.py
+  h_c5be3b3dad7ca8 1-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.7.6",
+  "base_commit_sha": "1c2b8f05e3100ffd088072135cfe5cfca4379746",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
