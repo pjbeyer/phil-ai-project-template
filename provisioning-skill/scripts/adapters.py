@@ -1,9 +1,11 @@
-"""Injected simulation boundary and quarantined LiveAdapter draft.
+"""Injected simulation boundary and quarantined LiveAdapter.
 
-The public CLI constructs only ``FakeAdapter``. ``LiveAdapter`` is a rejected,
-incomplete design artifact retained for redesign reference; its availability
-guard fails before runner/config validation, command construction, or runner
-invocation. There is no subprocess implementation or approved live path.
+The public CLI constructs only ``FakeAdapter``. ``LiveAdapter`` carries wired
+G01-G11 gate bodies behind a fail-closed availability guard (``_LIVE_EXECUTION_AVAILABLE
+= False`` plus the unconditional ``_require_available``/``_context`` refusal), so no
+live path is reachable until separately reviewed and supervised. The production
+subprocess authority lives only in ``production_transport.py`` behind a closure-held
+capability token; no public path can reach it.
 """
 from __future__ import annotations
 
@@ -22,7 +24,6 @@ from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
-from urllib.parse import urlparse
 
 from .backup import BackupError, assert_safe_backup_root, validate_backup_tree
 from .closeout import scan_staged_content, validate_commit_message
@@ -85,40 +86,6 @@ from .speckit import (
 
 class AdapterError(RuntimeError):
     """A command, safety assertion, or mandatory readback failed."""
-
-
-@dataclass(frozen=True)
-class CommandSpec:
-    """One argv-only command invocation with a complete isolated environment."""
-
-    operation: str
-    argv: tuple[str, ...]
-    cwd: Path | None
-    env: Mapping[str, str]
-    timeout_seconds: int = 60
-    mutating: bool = False
-    beads: bool = False
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    """Structured runner result; ``data`` contains operation-specific readback."""
-
-    operation: str
-    argv: tuple[str, ...]
-    cwd: Path | None
-    returncode: int
-    stdout: str = ""
-    stderr: str = ""
-    data: Mapping[str, Any] = field(default_factory=dict)
-
-
-class SafeCommandRunner(Protocol):
-    """A runner explicitly opting into the LiveAdapter safety contract."""
-
-    is_safe_command_runner: bool
-
-    def run(self, spec: CommandSpec) -> CommandResult: ...
 
 
 class ProvisioningAdapter(Protocol):
@@ -1501,16 +1468,6 @@ _SHA = re.compile(r"^[0-9a-f]{40}$")
 # compatibility, lifecycle ordering, and controlled tests pass review.
 _LIVE_EXECUTION_AVAILABLE = False
 _LIVE_UNAVAILABLE_MESSAGE = "supervised live execution is not yet approved or implemented"
-_FORBIDDEN_ARGS = {
-    "--force", "-f", "--overwrite", "--trust", "--UNSAFE", "--reinit-local",
-    "--discard-remote", "--destroy-token", "--init-if-missing",
-}
-_FORBIDDEN_WORDS = {
-    "reset", "clean", "remove", "uninstall", "delete", "drop", "destroy",
-    "start", "stop", "restart", "reconfigure",
-}
-_ALLOWED_PROGRAMS = {"git", "dolt", "copier", "bd", "specify", "python3"}
-_BEADS_ENV_KEYS = ("BEADS_DOLT_PORT", "BEADS_DOLT_DATABASE")
 _COMMIT_MESSAGE = "chore: initialize project operating baseline"
 # Canonical live-gate order. G03 lands via pjb-m0ap.3.1 (render allowlist) and
 # G08 remains blocked by the completed G08-C prerequisite, but both occupy
@@ -1547,43 +1504,6 @@ def _legacy_authorization_binding(
         )
     except ValueError as error:
         raise AdapterError(str(error)) from error
-
-
-def validate_command_spec(spec: CommandSpec, coverage_script: Path | None = None) -> None:
-    """Reject shell, destructive, force, service-control, and unpinned commands."""
-    if not spec.argv or spec.argv[0] not in _ALLOWED_PROGRAMS:
-        raise AdapterError("command program is outside the provisioning allowlist")
-    if any(not isinstance(arg, str) or "\x00" in arg for arg in spec.argv):
-        raise AdapterError("command argv contains an invalid argument")
-    if any(_SECRET.search(arg) for arg in spec.argv):
-        raise AdapterError("command argv contains secret-shaped material")
-    lowered = [arg.lower() for arg in spec.argv]
-    if any(arg in _FORBIDDEN_ARGS or arg.startswith("--force=") for arg in lowered):
-        raise AdapterError("force, overwrite, reinitialization, and unsafe flags are forbidden")
-    if any(word in _FORBIDDEN_WORDS for word in lowered[1:]):
-        raise AdapterError("destructive or service-control command is forbidden")
-    for arg in spec.argv:
-        if arg.startswith(("http://", "https://")):
-            parsed = urlparse(arg)
-            if parsed.username or parsed.password:
-                raise AdapterError("command URL must not contain credential userinfo")
-    if spec.argv[0] == "git" and "push" in lowered and any(arg.startswith("+") for arg in spec.argv):
-        raise AdapterError("forced Git refspecs are forbidden")
-    if spec.argv[0] == "dolt":
-        query = spec.argv[-1].strip().lower()
-        if "sql" not in lowered or not query.startswith("select ") or any(
-            token in query for token in (" insert ", " update ", " delete ", " drop ", " alter ")
-        ):
-            raise AdapterError("Dolt preflight is restricted to a SELECT probe")
-    if spec.argv[0] == "python3":
-        if "-c" in spec.argv or coverage_script is None or len(spec.argv) != 2:
-            raise AdapterError("Python execution is restricted to the approved coverage audit")
-        if Path(spec.argv[1]).resolve() != coverage_script.resolve():
-            raise AdapterError("Python command is not the approved coverage audit")
-    if spec.beads != (spec.argv[0] == "bd"):
-        raise AdapterError("Beads command classification is inconsistent")
-    if spec.beads and any(key in spec.env for key in _BEADS_ENV_KEYS):
-        raise AdapterError("stale Beads Dolt overrides must be absent from Beads commands")
 
 
 def _parse_beads_prefix_raw(raw: str) -> str:
@@ -1822,10 +1742,13 @@ def _parse_git_ls_remote_empty(raw: str) -> None:
 
 
 class LiveAdapter:
-    """Rejected G01-G11 draft; unavailable pending supervised replacement.
+    """G01-G11 live gate adapter; quarantined pending supervised approval.
 
-    ``_ControlledLiveExecutor`` is the future internal execution seam, but this
-    quarantined draft is intentionally not wired to or allowed to invoke it.
+    Every gate body (``_g01``..``_g11``) is wired to the production executor via
+    ``_production_executor`` (the only subprocess seam), but the whole class
+    remains fail-closed behind ``_LIVE_EXECUTION_AVAILABLE = False`` and the
+    unconditional ``_require_available``/``_context`` refusal, so no gate body is
+    reachable until the quarantine is separately reviewed and lifted.
     """
 
     _controlled_executor_type = _ControlledLiveExecutor
@@ -1833,7 +1756,7 @@ class LiveAdapter:
 
     def __init__(
         self,
-        runner: SafeCommandRunner | None = None,
+        runner: Any | None = None,
         config: LiveAdapterConfig | None = None,
     ) -> None:
         self.runner = runner
@@ -1916,56 +1839,14 @@ class LiveAdapter:
 
         The executor is constructed from the closure-held transport capability
         (not importable) and admits only the exact production transport type.
-        This is the only path by which a live gate body can reach a subprocess.
+        This is the only path by which a live gate body can reach a subprocess,
+        and it self-gates on the availability quarantine so a future ungated
+        call site cannot silently bypass the fail-closed boundary.
         """
+        self._require_available()
         from .models import _approved_project_home
 
         return make_production_executor(approved_home=_approved_project_home())
-
-    def _env(self, *, beads: bool = False) -> Mapping[str, str]:
-        _, _, _, config = self._context()
-        env = dict(config.command_env)
-        if beads:
-            for key in _BEADS_ENV_KEYS:
-                env.pop(key, None)
-        return MappingProxyType(env)
-
-    def _execute(
-        self,
-        operation: str,
-        argv: list[str] | tuple[str, ...],
-        *,
-        cwd: Path | None = None,
-        mutating: bool = False,
-    ) -> CommandResult:
-        _, _, _, config = self._context()
-        args = tuple(argv)
-        beads = bool(args and args[0] == "bd")
-        spec = CommandSpec(operation, args, cwd, self._env(beads=beads), 60, mutating, beads)
-        validate_command_spec(spec, config.coverage_script)
-        assert self.runner is not None
-        result = self.runner.run(spec)
-        if not isinstance(result, CommandResult):
-            raise AdapterError(f"{operation} runner returned an unstructured result")
-        if (
-            result.operation != spec.operation
-            or result.argv != spec.argv
-            or result.cwd != spec.cwd
-        ):
-            raise AdapterError(f"{operation} runner result does not match the requested command")
-        if result.returncode != 0:
-            detail = _SECRET.sub("[REDACTED]", result.stderr or result.stdout or "no diagnostic")
-            raise AdapterError(f"{operation} failed with exit {result.returncode}: {detail[:500]}")
-        if not isinstance(result.data, Mapping):
-            raise AdapterError(f"{operation} omitted structured readback data")
-        return result
-
-    @staticmethod
-    def _require(data: Mapping[str, Any], key: str, expected: Any, operation: str) -> None:
-        if data.get(key) != expected:
-            raise AdapterError(
-                f"{operation} readback mismatch for {key}: expected {expected!r}, got {data.get(key)!r}"
-            )
 
     def _origin_probe(self, operation: str) -> None:
         request, _, _, _ = self._context()

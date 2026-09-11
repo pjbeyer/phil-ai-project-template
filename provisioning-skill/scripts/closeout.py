@@ -4,7 +4,15 @@ from __future__ import annotations
 import re
 
 CONVENTIONAL = re.compile(r"^(feat|fix|docs|chore|refactor|style|test|ci|perf)(\([a-z0-9][a-z0-9-]*\))?: [a-z].*[^.]$")
-SECRET = re.compile(r"(?:ghp_|github_pat_|AKIA|-----BEGIN|https://[^/@\s]+@)", re.I)
+# Single shared secret-shape detector: mirrors the preflight/evidence SECRET so the
+# pre-commit staged-content scan rejects the same surface (1Password references,
+# label-shaped tokens, tokenized URLs) the rest of the pipeline already rejects.
+SECRET = re.compile(
+    r"(?:ghp_|github_pat_|AKIA[0-9A-Z]{8,}|-----BEGIN|"
+    r"https?://[^/@\s]+@|op://[^\s]+|"
+    r"(?:token|password|passwd|secret|api[_-]?key)\s*[=:]\s*\S*)",
+    re.I,
+)
 
 
 def validate_commit_message(message: str) -> None:

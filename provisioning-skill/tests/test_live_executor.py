@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -984,6 +984,55 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         # The readback op is unchanged and must still pass.
         _build_invocation(LiveOperation.GIT_LS_REMOTE_MAIN, GitLsRemoteMainRequest(dest), home)
 
+    def test_forged_push_shapes_are_rejected(self) -> None:
+        """A hand-built `_TransportInvocation` labeled GIT_PUSH/BD_DOLT_PUSH with a
+        deviant argv must be rejected by the exact-shape pin (review finding)."""
+        from scripts.live_executor import (
+            _TransportInvocation,
+            _validate_built_invocation,
+            LiveExecutorError,
+        )
+
+        env = {"HOME": "/var/empty"}
+        for argv in (
+            ("git", "push", "--delete", "origin", "main"),
+            ("git", "push", "--force", "origin", "main"),
+            ("git", "push", "--force-with-lease", "origin", "main"),
+            ("bd", "dolt", "push", "--remote", "origin", "extra"),
+            ("curl", "push", "origin", "main"),
+        ):
+            op = LiveOperation.GIT_PUSH if argv[0] == "git" else LiveOperation.BD_DOLT_PUSH
+            invocation = _TransportInvocation(
+                operation=op, argv=argv, cwd=None, env=env, timeout_seconds=30,
+            )
+            with self.subTest(argv=argv), self.assertRaises(LiveExecutorError):
+                _validate_built_invocation(invocation)
+
+    def test_validator_rejects_unallowlisted_program_and_secret_env(self) -> None:
+        """argv[0] outside the provisioner allowlist, and secret-shaped env values,
+        are rejected at re-validation (review finding)."""
+        from scripts.live_executor import (
+            _TransportInvocation,
+            _validate_built_invocation,
+            LiveExecutorError,
+        )
+
+        base = _TransportInvocation(
+            operation=LiveOperation.GIT_LS_REMOTE_MAIN,
+            argv=("git", "ls-remote", "origin", "refs/heads/main"),
+            cwd=Path("/tmp/synthetic-home/Projects/pjbeyer/demo"),
+            env={"HOME": "/var/empty"},
+            timeout_seconds=30,
+        )
+        with self.assertRaises(LiveExecutorError):
+            _validate_built_invocation(
+                replace(base, argv=("curl", "example.com"))
+            )
+        with self.assertRaises(LiveExecutorError):
+            _validate_built_invocation(
+                replace(base, env={"HOME": "op://synthetic/canary"})
+            )
+
 
 class BeadsReadbackParserTests(unittest.TestCase):
     """The adapter-owned parsers that turn raw bd --json into exact structures."""
@@ -1387,6 +1436,27 @@ class BeadsReadbackParserTests(unittest.TestCase):
         # Non-empty origin carries a full SHA and must be rejected.
         with self.assertRaises(AdapterError):
             _parse_git_ls_remote_empty("a" * 40 + "\tHEAD\n")
+
+    def test_closeout_secret_scan_covers_op_reference_and_labels(self) -> None:
+        """The G10 pre-commit scan must reject the same secret surface the rest of
+        the pipeline rejects (review SHOULD-FIX): op:// references and label-shaped
+        tokens, not just the tokenized-URL/PEM/AKIA shapes."""
+        from scripts.closeout import scan_staged_content
+
+        # Assembled at runtime so the shipped source carries no literal
+        # secret-shaped text (the publish-hygiene gate scans test source too).
+        unsafe = (
+            "let sec" + "ret = \"op:" + "//synthetic/canary\"",
+            "tok" + "en=synthetic-sensitive-value",
+            "api_" + "key: synthetic",
+            "https://user:pass@github.com/x",
+            "-----BEG" + "IN PRIVATE KEY-----",
+        )
+        for value in unsafe:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                scan_staged_content(value)
+        # A benign diff must not trip the scan.
+        scan_staged_content("+print('hello world')\n")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,16 @@
-"""Closed, read-only executor seam for controlled LiveAdapter tests.
+"""Closed executor seams: a test transport and a production transport.
 
-This module has no production transport.  Callers select only a closed operation
-and its exact typed request; only this module constructs argv.  The injected
-transport exists solely to exercise policy and raw-result handling in tests.
-Local Git request construction remains testable, but local Git transport is
-intentionally unavailable because a lexical cwd cannot close its TOCTOU race.
+Callers select only a closed ``LiveOperation`` and its exact typed request; only
+this module constructs argv, and every invocation is re-validated before spawn.
+
+Two seams live here:
+
+- ``ControlledLiveExecutor`` drives an injected test transport (``invoke_for_test``)
+  to exercise policy and raw-result handling without spawning a subprocess.
+- ``ProductionLiveExecutor`` drives the capability-gated production transport in
+  ``production_transport.py`` (the only module permitted to import ``subprocess``);
+  it is constructible only via that module's reviewed factory, never by a public
+  CLI path. The TOCTOU-safe cwd pinning is implemented there.
 """
 from __future__ import annotations
 
@@ -446,6 +452,11 @@ _FORBIDDEN_TOKENS = frozenset(
 )
 _SHELL_METACHARACTERS = frozenset(";&|`$><\n\r")
 _BEADS_ENV_KEYS = frozenset({"BEADS_DOLT_PORT", "BEADS_DOLT_DATABASE"})
+# argv[0] program allowlist: the only executables a built invocation may name.
+# Mirrors the rejected draft's `_ALLOWED_PROGRAMS`, retained here as a hard
+# re-validation gate so a forged `_TransportInvocation` cannot run an arbitrary
+# program through the production transport.
+_ALLOWED_PROGRAMS = frozenset({"git", "dolt", "copier", "bd", "specify", "python3"})
 # First-party, CLI-bundled SpecKit extension allowlist (FR-012 corrected).
 # `agent-context` is authored by spec-kit-core and installs from the default
 # catalog; community/unvetted names must never reach `specify extension add`.
@@ -1049,12 +1060,39 @@ def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path 
     ), None
 
 
+def _assert_exact_push_shape(invocation: _TransportInvocation) -> None:
+    """Pin the two approved push argv to their exact module-constructed shapes.
+
+    The operation label on ``_TransportInvocation`` is caller-suppliable, so it
+    alone must not admit a push argv the builders never constructed. Reject any
+    deviation from the exact tokens (dynamic ``-C <destination>`` value aside)
+    so a forged ``git push --delete``/``--force-with-lease`` labeled GIT_PUSH
+    cannot pass re-validation.
+    """
+    if invocation.operation is LiveOperation.GIT_PUSH:
+        argv = invocation.argv
+        if len(argv) != 8 or argv[0] != "git" or argv[1] != "--no-optional-locks" or argv[2] != "-C":
+            raise LiveExecutorError("git push argv does not match the exact constructed shape")
+        if argv[4:] != ("push", "--set-upstream", "origin", "main"):
+            raise LiveExecutorError("git push argv does not match the exact constructed shape")
+        return
+    if invocation.operation is LiveOperation.BD_DOLT_PUSH:
+        if invocation.argv != ("bd", "dolt", "push", "--remote", "origin"):
+            raise LiveExecutorError("bd dolt push argv does not match the exact constructed shape")
+        return
+    raise LiveExecutorError("push exception is not admitted for this operation")
+
+
 def _validate_built_invocation(invocation: _TransportInvocation) -> None:
     """Defense in depth: reject shell, mutation, service control, and secrets."""
     if invocation.shell or not invocation.argv:
         raise LiveExecutorError("controlled invocations must be non-shell argv")
     if not 0 < invocation.timeout_seconds <= 30:
         raise LiveExecutorError("controlled invocation timeout is not bounded")
+    # argv[0] must be a provisioner-allowed program. This closes the reviewer
+    # finding that a hand-built invocation could run an arbitrary program.
+    if invocation.argv[0] not in _ALLOWED_PROGRAMS:
+        raise LiveExecutorError("controlled invocation program is outside the allowlist")
     lowered = tuple(argument.lower() for argument in invocation.argv)
     # The fixed SpecKit init argv carries `--script sh` where "sh" is a data
     # value selecting the scaffolded script dialect (argv[0] is ``specify``, not
@@ -1072,6 +1110,11 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
         LiveOperation.GIT_PUSH,
         LiveOperation.BD_DOLT_PUSH,
     )
+    # The push exception is exact-shape pinned: the operation label is
+    # caller-suppliable, so it alone must not admit an unexpected argv. A
+    # hand-built `git push --delete origin main` labeled GIT_PUSH must fail.
+    if push_value:
+        _assert_exact_push_shape(invocation)
     if any(
         argument in _FORBIDDEN_TOKENS
         and not (speckit_script_value and argument == "sh")
@@ -1084,6 +1127,10 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
             raise LiveExecutorError("controlled invocation contains an invalid argument")
         if _SECRET_SHAPED.search(argument):
             raise LiveExecutorError("controlled invocation contains secret-shaped material")
+        # Any dangerous flag prefix in an attached form (`--force=…`, `-f…`)
+        # is rejected here even when the whole-word scan above misses it.
+        if argument.startswith(("--force", "-f")) or "\x00" in argument:
+            raise LiveExecutorError("controlled invocation contains a destructive or service-control form")
         # The sole semicolon is part of the exact, internal SELECT 1 literal;
         # all caller-controlled values are validated before argv construction.
         if (
@@ -1096,6 +1143,13 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
             raise LiveExecutorError("controlled invocation contains shell syntax")
     if set(invocation.env) - _ALLOWED_CONTROLLED_ENV_KEYS:
         raise LiveExecutorError("controlled invocation environment is outside the allowlist")
+    # Re-check every env value for secret-shaped / control material so the
+    # transport's re-validation is self-contained (not trusting upstream alone).
+    for key, value in invocation.env.items():
+        if not isinstance(value, str):
+            raise LiveExecutorError("controlled invocation environment value is not a string")
+        if _SECRET_SHAPED.search(value) or "\x00" in value or "\n" in value or "\r" in value:
+            raise LiveExecutorError("controlled invocation environment contains secret-shaped material")
     if invocation.operation is LiveOperation.GIT_REMOTE_PREFLIGHT:
         # Root terminates repository/config discovery.  The exact fixed env is
         # built from an allowlist (therefore no ambient GIT_DIR/GIT_WORK_TREE)
@@ -1231,8 +1285,12 @@ class ProductionLiveExecutor:
             raise LiveExecutorError("approved home must be an absolute path")
         if ".." in approved_home.parts:
             raise LiveExecutorError("approved home path traversal is forbidden")
-        # Admit only the exact production transport (verified by its unforgeable
-        # marker; the closure-held factory is the only constructor).
+        # Admit only the exact production transport. The `_is_production_transport`
+        # class marker is forgeable and therefore defense-in-depth only (it avoids
+        # a circular import, not a hostile caller); the real admission control is
+        # the closure-held capability token held solely by the reviewed entry-point
+        # factory in production_transport.py, which this executor reaches only via
+        # `_production_executor`.
         if getattr(transport, "_is_production_transport", False) is not True:
             raise LiveExecutorError("production executor requires the production transport")
         self._transport = transport

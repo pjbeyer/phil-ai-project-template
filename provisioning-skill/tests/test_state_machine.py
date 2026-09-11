@@ -73,8 +73,8 @@ class StateMachineTests(unittest.TestCase):
                 side_effect=AssertionError("quarantined LiveAdapter validated config"),
             ), patch.object(
                 adapter,
-                "_execute",
-                side_effect=AssertionError("quarantined LiveAdapter constructed a command"),
+                "_production_executor",
+                side_effect=AssertionError("quarantined LiveAdapter constructed an executor"),
             ):
                 with self.assertRaisesRegex(AdapterError, "not yet approved or implemented"):
                     adapter.prepare(request, origin, destination, fingerprint)
