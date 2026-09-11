@@ -38,7 +38,7 @@ def manifest_record(
     record: dict[str, object] = {
         "path": f"/synthetic/projects/{identity}",
         "database": f"{identity}_database",
-        "owner": "pjbeyer",
+        "owner": "personal",
         "profile": "default",
         "expected_remote": expected_remote,
         "expected_backup": True,
@@ -405,6 +405,57 @@ class ManifestCompatibilityTests(unittest.TestCase):
             append_record(self.manifest_path, candidate)
 
         self.assertEqual(self.manifest_path.read_bytes(), before)
+
+    def test_real_manifest_top_level_schema_is_accepted(self) -> None:
+        from scripts.manifest import MANIFEST_FIELDS
+
+        self.assertEqual(
+            MANIFEST_FIELDS,
+            {
+                "version", "generated_from", "managed_server", "required_jobs",
+                "repositories", "maintenance_policy",
+            },
+        )
+        full = {
+            "version": 2,
+            "generated_from": "synthetic",
+            "managed_server": {"host": "127.0.0.1", "port": 3307},
+            "required_jobs": {"Hermes: Beads health review": {"profile": "default"}},
+            "repositories": [manifest_record("real")],
+            "maintenance_policy": {"backup_max_age_hours": 18},
+        }
+        self.manifest_path.write_text(json.dumps(full), encoding="utf-8")
+        manifest, digest = load_manifest(self.manifest_path)
+        validate_records(manifest["repositories"])
+        self.assertEqual(manifest["repositories"], [manifest_record("real")])
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_real_record_variants_and_remote_exception_are_accepted(self) -> None:
+        records = [
+            manifest_record("a", expected_remote=None, expected_sync="backup-only-no-dolt-remote"),
+            manifest_record("b", expected_sync="github-upstream-pull-and-manual-dolt-remote"),
+            manifest_record("c", expected_sync="remote-plus-backup"),
+        ]
+        records[0]["remote_health"] = "not-configured"
+        records[0]["remote_exception"] = None
+        records[1]["restore_tier"] = "canonical"
+        self.write_manifest(records)
+        manifest, _ = load_manifest(self.manifest_path)
+        validate_records(manifest["repositories"])
+
+        bad = {**manifest_record("d", expected_sync="remote-plus-backup"), "remote_exception": "boom"}
+        with self.assertRaises(ManifestError):
+            validate_records([bad])
+
+    def test_owner_mapping_matches_real_manifest(self) -> None:
+        from scripts.manifest import MANIFEST_OWNER_VALUES, manifest_owner_for
+
+        self.assertEqual(manifest_owner_for("pjbeyer"), "personal")
+        self.assertEqual(manifest_owner_for("flexapp"), "work")
+        self.assertEqual(MANIFEST_OWNER_VALUES, {"personal", "work"})
+        for unapproved in ("example", "unknown", ""):
+            with self.subTest(owner=unapproved), self.assertRaises(ManifestError):
+                manifest_owner_for(unapproved)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from scripts.manifest import AppendResult, ManifestError, append_record, load_ma
 
 def record(path: str = "/projects/demo", database: str = "demo") -> dict:
     return {
-        "path": path, "prefix": database, "database": database, "owner": "pjbeyer", "profile": "default",
+        "path": path, "prefix": database, "database": database, "owner": "personal", "profile": "default",
         "expected_remote": "origin", "expected_backup": True, "expected_sync": "manual-dolt-remote",
         "owning_jobs": [
             "Hermes: Beads health review", "Hermes: compliance audit",
@@ -117,8 +117,8 @@ class ManifestContractTests(unittest.TestCase):
                 '"prefix": "demo", "prefix": "shadow"',
             ) + "]}",
             "record owner": '{"repositories": [' + valid.replace(
-                '"owner": "pjbeyer"',
-                '"owner": "pjbeyer", "owner": "shadow"',
+                '"owner": "personal"',
+                '"owner": "personal", "owner": "shadow"',
             ) + "]}",
         }
         candidate = record("/projects/second", "second")

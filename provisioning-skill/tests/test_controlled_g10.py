@@ -55,7 +55,7 @@ def manifest_record(path: Path, prefix: str, database: str) -> dict[str, object]
         "path": str(path),
         "prefix": prefix,
         "database": database,
-        "owner": "pjbeyer",
+        "owner": "personal",
         "profile": "default",
         "expected_remote": "origin",
         "expected_backup": True,
