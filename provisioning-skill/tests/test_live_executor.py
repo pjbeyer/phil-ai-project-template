@@ -569,6 +569,10 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.BEADS_SETUP_CHECK,
                 LiveOperation.BEADS_HOOKS_INSTALL,
                 LiveOperation.BEADS_HOOKS_LIST,
+                LiveOperation.BEADS_BACKUP_INIT,
+                LiveOperation.BEADS_BACKUP_SYNC,
+                LiveOperation.BEADS_BACKUP_STATUS,
+                LiveOperation.COVERAGE_AUDIT,
             },
         )
 
@@ -862,6 +866,26 @@ class ControlledLiveExecutorTests(unittest.TestCase):
             ("bd", "hooks", "list", "--json"),
         )
 
+    def test_backup_and_audit_operations_are_fail_closed_under_test_transport(self) -> None:
+        from scripts.live_executor import (
+            BeadsBackupInitRequest,
+            BeadsBackupStatusRequest,
+            BeadsBackupSyncRequest,
+            CoverageAuditRequest,
+        )
+
+        for operation, params in (
+            (LiveOperation.BEADS_BACKUP_INIT, BeadsBackupInitRequest(Path("/tmp/x"))),
+            (LiveOperation.BEADS_BACKUP_SYNC, BeadsBackupSyncRequest(Path("/tmp/x"))),
+            (LiveOperation.BEADS_BACKUP_STATUS, BeadsBackupStatusRequest(Path("/tmp/x"))),
+            (
+                LiveOperation.COVERAGE_AUDIT,
+                CoverageAuditRequest(Path("/tmp/a"), Path("/tmp/b"), Path("/tmp/c")),
+            ),
+        ):
+            with self.subTest(operation=operation), self.assertRaises(LiveExecutorError):
+                self.executor.execute(operation, params)
+
 
 class BeadsReadbackParserTests(unittest.TestCase):
     """The adapter-owned parsers that turn raw bd --json into exact structures."""
@@ -919,6 +943,100 @@ class BeadsReadbackParserTests(unittest.TestCase):
         for raw in ("[]", '{"hooks":[]"extra"}', '{"hooks":"notalist"}', '{"hooks":[{"Name":"x"}]}'):
             with self.subTest(raw=raw), self.assertRaises(AdapterError):
                 _parse_beads_hooks_raw(raw)
+
+    def test_beads_backup_operations_build_exact_argv(self) -> None:
+        from scripts.live_executor import (
+            BeadsBackupInitRequest,
+            BeadsBackupStatusRequest,
+            BeadsBackupSyncRequest,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        init_argv, init_cwd = live_executor._beads_backup_init_argv(BeadsBackupInitRequest(dest))
+        self.assertEqual(
+            init_argv,
+            ("bd", "backup", "init", str(dest / ".beads" / "backup")),
+        )
+        self.assertEqual(init_cwd, dest)
+        sync_argv, sync_cwd = live_executor._beads_backup_sync_argv(BeadsBackupSyncRequest(dest))
+        self.assertEqual(sync_argv, ("bd", "backup", "sync"))
+        self.assertEqual(sync_cwd, dest)
+        status_argv, status_cwd = live_executor._beads_backup_status_argv(BeadsBackupStatusRequest(dest))
+        self.assertEqual(status_argv, ("bd", "backup", "status", "--json"))
+        self.assertEqual(status_cwd, dest)
+
+    def test_beads_backup_operations_reject_unsafe_destination(self) -> None:
+        from scripts.live_executor import LiveExecutorError, BeadsBackupInitRequest
+
+        for dest in (Path("relative/path"), Path("/tmp/../escape")):
+            with self.subTest(dest=dest), self.assertRaises(LiveExecutorError):
+                live_executor._beads_backup_init_argv(BeadsBackupInitRequest(dest))
+
+    def test_coverage_audit_builds_exact_argv_and_extended_env(self) -> None:
+        from scripts.live_executor import CoverageAuditRequest
+
+        scripts_dir = Path("/tmp/synthetic-home/.hermes/scripts")
+        hermes_home = Path("/tmp/synthetic-home/.hermes")
+        state_home = Path("/tmp/synthetic-home/.local/state")
+        argv, cwd = live_executor._coverage_audit_argv(
+            CoverageAuditRequest(scripts_dir, hermes_home, state_home)
+        )
+        self.assertEqual(argv, ("python3", str(scripts_dir / "audit_beads_cron_coverage.py")))
+        self.assertEqual(cwd, scripts_dir)
+
+        invocation = live_executor._build_invocation(
+            LiveOperation.COVERAGE_AUDIT,
+            CoverageAuditRequest(scripts_dir, hermes_home, state_home),
+            Path("/tmp/synthetic-home"),
+        )
+        self.assertEqual(invocation.argv[0], "python3")
+        self.assertEqual(invocation.cwd, scripts_dir)
+        self.assertEqual(invocation.env["HERMES_HOME"], str(hermes_home))
+        self.assertEqual(invocation.env["XDG_STATE_HOME"], str(state_home))
+        self.assertNotIn("BEADS_DOLT_PORT", invocation.env)
+
+    def test_coverage_audit_rejects_unsafe_or_relative_paths(self) -> None:
+        from scripts.live_executor import LiveExecutorError, CoverageAuditRequest
+
+        good = CoverageAuditRequest(
+            Path("/tmp/synthetic-home/.hermes/scripts"),
+            Path("/tmp/synthetic-home/.hermes"),
+            Path("/tmp/synthetic-home/.local/state"),
+        )
+        for mutate in (
+            lambda r: CoverageAuditRequest(Path("scripts"), r.hermes_home, r.state_home),
+            lambda r: CoverageAuditRequest(r.scripts_dir, Path(".."), r.state_home),
+            lambda r: CoverageAuditRequest(r.scripts_dir, r.hermes_home, Path("/tmp/../escape")),
+        ):
+            with self.subTest(), self.assertRaises(LiveExecutorError):
+                live_executor._coverage_audit_argv(mutate(good))
+
+    def test_parse_dolt_backup_status_raw_extracts_dolt_object(self) -> None:
+        from scripts.adapters import AdapterError, _parse_dolt_backup_status_raw
+
+        raw = (
+            '{"backup":{"last_dolt_commit":"x","timestamp":"t"},'
+            '"database_size":{"bytes":0,"human":"0 B"},'
+            '"dolt":{"backup_name":"default","backup_url":"file:///tmp/x/.beads/backup",'
+            '"configured":true,"created_at":"c","last_sync":"s","sync_duration":"d"}}'
+        )
+        parsed = _parse_dolt_backup_status_raw(raw)
+        self.assertEqual(parsed["backup_url"], "file:///tmp/x/.beads/backup")
+        self.assertIs(parsed["configured"], True)
+
+    def test_parse_dolt_backup_status_raw_rejects_unconfigured_or_malformed(self) -> None:
+        from scripts.adapters import AdapterError, _parse_dolt_backup_status_raw
+
+        bad = (
+            "[]",
+            '{"dolt":{}}',
+            '{"dolt":{"configured":false,"backup_url":"x"}}',
+            '{"dolt":{"configured":true}}',
+            '{"dolt":"notanobject"}',
+        )
+        for raw in bad:
+            with self.subTest(raw=raw), self.assertRaises(AdapterError):
+                _parse_dolt_backup_status_raw(raw)
 
 
 if __name__ == "__main__":

@@ -198,11 +198,54 @@ def _approved_manifest_path() -> Path:
         ) from error
 
 
+def _hermes_home() -> Path:
+    """Resolve the operator's Hermes home root, fail-closed if unset.
+
+    ``HERMES_HOME`` when set, otherwise ``Path.home() / ".hermes"``. This is the
+    same runtime derivation the coverage audit and the manifest resolver already
+    use (FR-027/NFR-007); the result is an exact canonical absolute path.
+    """
+    home = os.environ.get("HERMES_HOME")
+    base = Path(home) if home else (Path.home() / ".hermes")
+    try:
+        return _canonical_absolute_path(base, "Hermes home")
+    except ConfigurationError as error:
+        raise ConfigurationError(
+            "Hermes home must resolve to an exact canonical absolute path"
+        ) from error
+
+
+def _coverage_audit_scripts_dir() -> Path:
+    """Resolve the coverage audit's scripts directory (runtime-derived)."""
+    scripts_dir = _hermes_home() / "scripts"
+    try:
+        return _canonical_absolute_path(scripts_dir, "coverage audit scripts directory")
+    except ConfigurationError as error:
+        raise ConfigurationError(
+            "coverage audit scripts directory must resolve to an exact canonical absolute path"
+        ) from error
+
+
+def _coverage_audit_state_home() -> Path:
+    """Resolve the XDG state base the audit writes its readback state under."""
+    state_home = os.environ.get("XDG_STATE_HOME")
+    base = Path(state_home) if state_home else (Path.home() / ".local" / "state")
+    try:
+        return _canonical_absolute_path(base, "XDG state home")
+    except ConfigurationError as error:
+        raise ConfigurationError(
+            "XDG state home must resolve to an exact canonical absolute path"
+        ) from error
+
+
 APPROVED_TEMPLATE_SOURCE_IDENTITIES = frozenset({"pjbeyer/phil-ai-project-template"})
 APPROVED_TEMPLATE_MINIMUM_TAG = "v0.1.3"
 APPROVED_MANIFEST_IDENTITY = "managed-projects-manifest/v1"
 APPROVED_AUDIT_IDENTITY = "managed-projects-coverage-audit/v1"
 APPROVED_EXECUTOR_POLICY_VERSION = "controlled-live-executor/v1"
+# FR-014 backup ownership contract: pjbeyer:staff, dirs 0700, files 0600.
+APPROVED_BACKUP_USER = "pjbeyer"
+APPROVED_BACKUP_GROUP = "staff"
 APPROVED_COMPONENT_NAMES = frozenset(
     {
         "verify-tasks",

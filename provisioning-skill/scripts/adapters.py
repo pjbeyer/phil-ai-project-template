@@ -29,12 +29,16 @@ from .closeout import scan_staged_content, validate_commit_message
 from .controlled_fixture import ControlledFixtureError, ControlledFixtureSession, ControlledMutationTarget
 from .live_executor import (
     ControlledLiveExecutor as _ControlledLiveExecutor,
+    BeadsBackupInitRequest,
+    BeadsBackupStatusRequest,
+    BeadsBackupSyncRequest,
     BeadsHooksInstallRequest,
     BeadsHooksListRequest,
     BeadsInitRequest,
     BeadsPrefixReadRequest,
     BeadsSetupRequest,
     CopierRenderRequest,
+    CoverageAuditRequest,
     DoltRemoteAddRequest,
     DoltRemoteListRequest,
     GitCloneRequest,
@@ -1633,6 +1637,29 @@ def _parse_beads_hooks_raw(raw: str) -> dict[str, bool]:
     return status
 
 
+def _parse_dolt_backup_status_raw(raw: str) -> dict[str, Any]:
+    """Parse ``bd backup status --json`` into the nested Dolt status fields.
+
+    The command emits ``{"backup":{...},"database_size":{...},"dolt":{...}}``.
+    Return only the exact ``dolt`` object; anything else is a mismatch.
+    """
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("backup status readback was not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise AdapterError("backup status readback was not a JSON object")
+    dolt = payload.get("dolt")
+    if not isinstance(dolt, dict):
+        raise AdapterError("backup status readback omitted the dolt object")
+    if dolt.get("configured") is not True:
+        raise AdapterError("backup status readback reported the backup is not configured")
+    backup_url = dolt.get("backup_url")
+    if not isinstance(backup_url, str) or not backup_url:
+        raise AdapterError("backup status readback omitted a backup_url")
+    return dict(dolt)
+
+
 class LiveAdapter:
     """Rejected G01-G11 draft; unavailable pending supervised replacement.
 
@@ -2241,7 +2268,15 @@ class LiveAdapter:
             raise AdapterError("backup sidecar does not point to the exact repository backup root")
 
     def _g07(self) -> None:
-        request, _, destination, config = self._context()
+        from .models import (
+            APPROVED_BACKUP_GROUP,
+            APPROVED_BACKUP_USER,
+            _coverage_audit_scripts_dir,
+            _coverage_audit_state_home,
+            _hermes_home,
+        )
+
+        request, _, destination, _ = self._context()
         metadata = self.read_metadata()
         expected_enrollment = (
             str(destination), request.beads_prefix, metadata["dolt_database"]
@@ -2262,12 +2297,14 @@ class LiveAdapter:
             assert_safe_backup_root(destination, backup_root)
         except BackupError as exc:
             raise AdapterError(str(exc)) from exc
-        self._execute(
-            "g07.backup.init",
-            ["bd", "backup", "init", str(backup_root)],
-            cwd=destination,
-            mutating=True,
+        executor = self._production_executor()
+        init = executor.execute(
+            LiveOperation.BEADS_BACKUP_INIT,
+            BeadsBackupInitRequest(destination),
         )
+        if init.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", init.stderr or init.stdout or "no diagnostic")
+            raise AdapterError(f"g07.backup.init failed with exit {init.returncode}: {detail[:500]}")
         try:
             assert_safe_backup_root(destination, backup_root)
         except BackupError as exc:
@@ -2278,31 +2315,37 @@ class LiveAdapter:
             assert_safe_backup_root(destination, backup_root)
         except BackupError as exc:
             raise AdapterError(f"backup root failed pre-synchronization safety check: {exc}") from exc
-        self._execute(
-            "g07.backup.sync", ["bd", "backup", "sync"], cwd=destination, mutating=True
+        sync = executor.execute(
+            LiveOperation.BEADS_BACKUP_SYNC,
+            BeadsBackupSyncRequest(destination),
         )
+        if sync.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", sync.stderr or sync.stdout or "no diagnostic")
+            raise AdapterError(f"g07.backup.sync failed with exit {sync.returncode}: {detail[:500]}")
         try:
             assert_safe_backup_root(destination, backup_root)
         except BackupError as exc:
             raise AdapterError(f"backup root failed post-synchronization safety check: {exc}") from exc
-        status = self._execute(
-            "g07.backup.read", ["bd", "backup", "status", "--json"], cwd=destination
+        status = executor.execute(
+            LiveOperation.BEADS_BACKUP_STATUS,
+            BeadsBackupStatusRequest(destination),
         )
-        for key, expected in (
-            ("backup_root", str(backup_root)), ("synchronized", True), ("fresh", True),
-        ):
-            self._require(status.data, key, expected, "g07.backup.read")
+        if status.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", status.stderr or status.stdout or "no diagnostic")
+            raise AdapterError(f"g07.backup.status failed with exit {status.returncode}: {detail[:500]}")
+        status_dolt = _parse_dolt_backup_status_raw(status.stdout)
+        expected_url = backup_root.resolve(strict=False).as_uri()
+        if status_dolt.get("backup_url") != expected_url:
+            raise AdapterError("g07.backup.status did not point to the exact repository backup root")
         try:
-            uid = pwd.getpwnam(config.expected_backup_user).pw_uid
-            gid = grp.getgrnam(config.expected_backup_group).gr_gid
+            uid = pwd.getpwnam(APPROVED_BACKUP_USER).pw_uid
+            gid = grp.getgrnam(APPROVED_BACKUP_GROUP).gr_gid
         except KeyError as exc:
             raise AdapterError("required backup owner or group is unavailable") from exc
         self._read_sidecar(sidecar, backup_root, uid, gid)
         try:
             validate_backup_tree(backup_root)
-            self._validate_backup_ownership(
-                backup_root, config.expected_backup_user, config.expected_backup_group
-            )
+            self._validate_backup_ownership(backup_root, APPROVED_BACKUP_USER, APPROVED_BACKUP_GROUP)
         except AdapterError:
             raise
         except (OSError, BackupError) as exc:
@@ -2313,23 +2356,24 @@ class LiveAdapter:
             # concurrent replacement races without descriptor-relative traversal.
             assert_safe_backup_root(destination, backup_root)
             validate_backup_tree(backup_root)
-            self._validate_backup_ownership(
-                backup_root, config.expected_backup_user, config.expected_backup_group
-            )
+            self._validate_backup_ownership(backup_root, APPROVED_BACKUP_USER, APPROVED_BACKUP_GROUP)
             self._read_sidecar(sidecar, backup_root, uid, gid)
             assert_safe_backup_root(destination, backup_root)
         except AdapterError:
             raise
         except (OSError, BackupError) as exc:
             raise AdapterError("backup pre-coverage tree revalidation failed") from exc
-        coverage = self._execute(
-            "g07.coverage", ["python3", str(config.coverage_script)], cwd=config.coverage_script.parent
+        coverage = executor.execute(
+            LiveOperation.COVERAGE_AUDIT,
+            CoverageAuditRequest(
+                _coverage_audit_scripts_dir(),
+                _hermes_home(),
+                _coverage_audit_state_home(),
+            ),
         )
-        self._require(coverage.data, "covered_path", str(destination), "g07.coverage")
-        self._require(
-            coverage.data, "covered_database", metadata["dolt_database"], "g07.coverage"
-        )
-        self._require(coverage.data, "findings", [], "g07.coverage")
+        if coverage.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", coverage.stdout or coverage.stderr or "no diagnostic")
+            raise AdapterError(f"g07.coverage reported findings (exit {coverage.returncode}): {detail[:500]}")
         self._evidence[Gate.BACKUP] = (
             "native backup sidecar, exact root, synchronization, freshness, ownership, modes, and tree "
             "safety read back before terminal manifest coverage confirmation"

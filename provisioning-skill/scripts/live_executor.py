@@ -46,6 +46,10 @@ class LiveOperation(Enum):
     BEADS_SETUP_CHECK = "beads-setup-check"
     BEADS_HOOKS_INSTALL = "beads-hooks-install"
     BEADS_HOOKS_LIST = "beads-hooks-list"
+    BEADS_BACKUP_INIT = "beads-backup-init"
+    BEADS_BACKUP_SYNC = "beads-backup-sync"
+    BEADS_BACKUP_STATUS = "beads-backup-status"
+    COVERAGE_AUDIT = "coverage-audit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +172,43 @@ class CentralDoltProbeRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class BeadsBackupInitRequest:
+    """Initialize the native backup destination at <repo>/.beads/backup."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class BeadsBackupSyncRequest:
+    """Run the native backup sync against the configured destination."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class BeadsBackupStatusRequest:
+    """Read native backup status as JSON for exact readback."""
+
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageAuditRequest:
+    """Run the existing read-only coverage audit from its own scripts directory.
+
+    ``scripts_dir`` is the runtime-derived ``<hermes_home>/scripts`` directory,
+    ``hermes_home`` the operator's Hermes home, and ``state_home`` the operator's
+    XDG state base. None is hard-coded; each is validated before the audit argv/env
+    is built. The audit is read-only with respect to repositories, Dolt data, Cron
+    configuration, credentials, and external systems.
+    """
+
+    scripts_dir: Path
+    hermes_home: Path
+    state_home: Path
+
+
+@dataclass(frozen=True, slots=True)
 class RawResult:
     """Bounded raw process fields; no caller-supplied facts or data map."""
 
@@ -273,7 +314,11 @@ MINIMAL_ENVIRONMENT_KEYS = frozenset(
         "GIT_OPTIONAL_LOCKS",
     }
 )
-_ALLOWED_CONTROLLED_ENV_KEYS = MINIMAL_ENVIRONMENT_KEYS | _BEADS_ENV_KEYS
+# The coverage audit is the sole bounded env-surface expansion: it must read the
+# real Hermes home + XDG state base to resolve the shared manifest, Cron jobs, and
+# its own state readback. These are non-secret location values, never credentials.
+_AUDIT_ENV_KEYS = frozenset({"HERMES_HOME", "XDG_STATE_HOME"})
+_ALLOWED_CONTROLLED_ENV_KEYS = MINIMAL_ENVIRONMENT_KEYS | _BEADS_ENV_KEYS | _AUDIT_ENV_KEYS
 # Remote preflight starts at the filesystem root: it is absolute, always exists,
 # and ``parent == self`` leaves no ancestor in which Git could discover config.
 NEUTRAL_GIT_CWD = Path("/")
@@ -577,6 +622,57 @@ def _beads_hooks_list_argv(request: BeadsHooksListRequest) -> tuple[tuple[str, .
     return _beads_destination_argv(request, destination=request.destination, args=("hooks", "list", "--json"))
 
 
+def _backup_root(request: BeadsBackupInitRequest) -> Path:
+    if not isinstance(request.destination, Path) or not request.destination.is_absolute():
+        raise LiveExecutorError("backup destination must be an absolute path")
+    if ".." in request.destination.parts:
+        raise LiveExecutorError("backup destination path traversal is forbidden")
+    _reject_secret_or_unsafe_text(str(request.destination), "backup destination")
+    return request.destination / ".beads" / "backup"
+
+
+def _beads_backup_init_argv(request: BeadsBackupInitRequest) -> tuple[tuple[str, ...], Path]:
+    backup_root = _backup_root(request)
+    _reject_secret_or_unsafe_text(str(backup_root), "backup root path")
+    return _beads_destination_argv(
+        request, destination=request.destination, args=("backup", "init", str(backup_root))
+    )
+
+
+def _beads_backup_sync_argv(request: BeadsBackupSyncRequest) -> tuple[tuple[str, ...], Path]:
+    return _beads_destination_argv(
+        request, destination=request.destination, args=("backup", "sync")
+    )
+
+
+def _beads_backup_status_argv(request: BeadsBackupStatusRequest) -> tuple[tuple[str, ...], Path]:
+    return _beads_destination_argv(
+        request, destination=request.destination, args=("backup", "status", "--json")
+    )
+
+
+def _coverage_audit_argv(request: CoverageAuditRequest) -> tuple[tuple[str, ...], Path]:
+    if not isinstance(request.scripts_dir, Path) or not request.scripts_dir.is_absolute():
+        raise LiveExecutorError("coverage audit scripts dir must be an absolute path")
+    if not isinstance(request.hermes_home, Path) or not request.hermes_home.is_absolute():
+        raise LiveExecutorError("coverage audit hermes home must be an absolute path")
+    if not isinstance(request.state_home, Path) or not request.state_home.is_absolute():
+        raise LiveExecutorError("coverage audit state home must be an absolute path")
+    for label, path in (
+        ("coverage audit scripts dir", request.scripts_dir),
+        ("coverage audit hermes home", request.hermes_home),
+        ("coverage audit state home", request.state_home),
+    ):
+        if ".." in path.parts:
+            raise LiveExecutorError(f"{label} path traversal is forbidden")
+        _reject_secret_or_unsafe_text(str(path), label)
+    script = request.scripts_dir / "audit_beads_cron_coverage.py"
+    if script.parent != request.scripts_dir:
+        raise LiveExecutorError("coverage audit script must live directly in the scripts dir")
+    _reject_secret_or_unsafe_text(str(script), "coverage audit script")
+    return ("python3", str(script)), request.scripts_dir
+
+
 def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path | None]:
     del request
     return (
@@ -688,6 +784,10 @@ class ControlledLiveExecutor:
             LiveOperation.BEADS_SETUP_CHECK,
             LiveOperation.BEADS_HOOKS_INSTALL,
             LiveOperation.BEADS_HOOKS_LIST,
+            LiveOperation.BEADS_BACKUP_INIT,
+            LiveOperation.BEADS_BACKUP_SYNC,
+            LiveOperation.BEADS_BACKUP_STATUS,
+            LiveOperation.COVERAGE_AUDIT,
         ):
             # Build and validate the exact argv, but do not hand it to the test
             # transport: an in-memory transport cannot perform a real clone/render
@@ -833,15 +933,44 @@ def _build_invocation(
         if type(parameters) is not BeadsHooksListRequest:
             raise LiveExecutorError("live operation received the wrong request type")
         argv, cwd = _beads_hooks_list_argv(parameters)
+    elif operation is LiveOperation.BEADS_BACKUP_INIT:
+        if type(parameters) is not BeadsBackupInitRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _beads_backup_init_argv(parameters)
+    elif operation is LiveOperation.BEADS_BACKUP_SYNC:
+        if type(parameters) is not BeadsBackupSyncRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _beads_backup_sync_argv(parameters)
+    elif operation is LiveOperation.BEADS_BACKUP_STATUS:
+        if type(parameters) is not BeadsBackupStatusRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _beads_backup_status_argv(parameters)
+    elif operation is LiveOperation.COVERAGE_AUDIT:
+        if type(parameters) is not CoverageAuditRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _coverage_audit_argv(parameters)
     else:  # pragma: no cover - guarded by exact enum admission above
         raise LiveExecutorError("unknown live operation")
+
+    if operation is LiveOperation.COVERAGE_AUDIT:
+        environment = dict(_FIXED_ENVIRONMENT)
+        environment["HERMES_HOME"] = str(parameters.hermes_home)
+        environment["XDG_STATE_HOME"] = str(parameters.state_home)
+        for value in environment.values():
+            if _SECRET_SHAPED.search(value) or "\x00" in value or "\n" in value or "\r" in value:
+                raise LiveExecutorError("coverage audit environment contains invalid material")
+        env = MappingProxyType(environment)
+        timeout = 30
+    else:
+        env = _minimal_environment(_FIXED_ENVIRONMENT, program=argv[0])
+        timeout = TIMEOUT_SECONDS
 
     invocation = _TransportInvocation(
         operation=operation,
         argv=argv,
         cwd=cwd,
-        env=_minimal_environment(_FIXED_ENVIRONMENT, program=argv[0]),
-        timeout_seconds=TIMEOUT_SECONDS,
+        env=env,
+        timeout_seconds=timeout,
         shell=False,
     )
     _validate_built_invocation(invocation)
