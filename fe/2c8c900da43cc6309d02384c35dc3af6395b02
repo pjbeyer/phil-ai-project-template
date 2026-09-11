@@ -1,0 +1,28 @@
+provisioning-skill/scripts/manifest.py
+  h_c5be3b3dad7ca8 1-9,34-71,106-110,144-145,161-179,188-194,198,205-209,234-235
+provisioning-skill/tests/test_controlled_g07.py
+  h_c5be3b3dad7ca8 52
+provisioning-skill/tests/test_controlled_g09.py
+  h_c5be3b3dad7ca8 58
+provisioning-skill/tests/test_controlled_g10.py
+  h_c5be3b3dad7ca8 58
+provisioning-skill/tests/test_controlled_g11.py
+  h_c5be3b3dad7ca8 60
+provisioning-skill/tests/test_controlled_manifest.py
+  h_c5be3b3dad7ca8 42
+provisioning-skill/tests/test_manifest_compatibility.py
+  h_c5be3b3dad7ca8 41,409-459
+provisioning-skill/tests/test_manifest_contract.py
+  h_c5be3b3dad7ca8 18,120-121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.7.6",
+  "base_commit_sha": "fe2c8c900da43cc6309d02384c35dc3af6395b02",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
