@@ -9,8 +9,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .models import ProvisioningRequest
+from .vocabulary import PROJECT_KIND_VALUES, VISIBILITY_VALUES
 
-SUPPORTED_KINDS = {"generic", "macos-cli", "homebrew-tap"}
+SUPPORTED_KINDS = PROJECT_KIND_VALUES
+SUPPORTED_VISIBILITIES = VISIBILITY_VALUES
 PREFIX = re.compile(r"^[a-z][a-z0-9]{1,15}$")
 HTTPS = re.compile(r"^https://github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?$")
 SSH = re.compile(r"^git@github\.com:([^/\s]+)/([^/\s]+?)(?:\.git)?$")
@@ -72,6 +74,8 @@ def _normalize_common(
     origin = parse_origin(request.origin_url)
     if request.project_kind not in SUPPORTED_KINDS:
         raise PreflightError("unsupported project kind")
+    if request.visibility not in SUPPORTED_VISIBILITIES:
+        raise PreflightError("unsupported visibility")
     if not PREFIX.fullmatch(request.beads_prefix):
         raise PreflightError("Beads prefix must be 2–16 lowercase alphanumeric characters starting with a letter")
     destination = destination_for(origin, request.destination_confirmation, home)

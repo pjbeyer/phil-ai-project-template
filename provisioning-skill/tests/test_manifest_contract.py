@@ -15,7 +15,9 @@ from scripts.manifest import AppendResult, ManifestError, append_record, load_ma
 
 def record(path: str = "/projects/demo", database: str = "demo") -> dict:
     return {
-        "path": path, "prefix": database, "database": database, "owner": "personal", "profile": "default",
+        "path": path, "prefix": database, "database": database, "owner": "personal",
+        "project_kind": "generic", "visibility": "personal-only",
+        "profile": "default",
         "expected_remote": "origin", "expected_backup": True, "expected_sync": "manual-dolt-remote",
         "owning_jobs": [
             "Hermes: Beads health review", "Hermes: compliance audit",

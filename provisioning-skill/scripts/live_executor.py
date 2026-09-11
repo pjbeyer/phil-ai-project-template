@@ -472,6 +472,7 @@ _APPROVED_BOOTSTRAP_MARKERS = frozenset(
         "homebrew-first-package",
         "homebrew-actions-secret",
         "homebrew-lifecycle-tests",
+        "coding-agent-plugin-skeleton",
     }
 )
 # Floating refs must never be rendered or resolved as an immutable revision.

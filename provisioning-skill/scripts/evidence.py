@@ -246,6 +246,7 @@ def request_fingerprint(request: ProvisioningRequest, destination: Path) -> str:
         "origin_url": request.origin_url,
         "beads_prefix": request.beads_prefix,
         "project_kind": request.project_kind,
+        "visibility": request.visibility,
         "description": request.description,
         "destination_confirmation": request.destination_confirmation,
     }

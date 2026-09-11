@@ -15,8 +15,11 @@ from types import MappingProxyType
 from typing import Any, Literal, Mapping
 from urllib.parse import urlparse
 
-ProjectKind = Literal["generic", "macos-cli", "homebrew-tap"]
-_PROJECT_KINDS = frozenset({"generic", "macos-cli", "homebrew-tap"})
+ProjectKind = Literal["generic", "macos-cli", "homebrew-tap", "coding-agent-plugin"]
+_PROJECT_KINDS = frozenset({"generic", "macos-cli", "homebrew-tap", "coding-agent-plugin"})
+Visibility = Literal["personal-only", "work-internal", "open-source"]
+_VISIBILITIES = frozenset({"personal-only", "work-internal", "open-source"})
+_DEFAULT_VISIBILITY = "personal-only"
 ResultState = Literal[
     "complete", "blocked-preflight", "partial", "verified-existing", "simulation-passed",
 ]
@@ -282,6 +285,7 @@ APPROVED_ISSUE_MARKERS = frozenset(
         "homebrew-first-package",
         "homebrew-actions-secret",
         "homebrew-lifecycle-tests",
+        "coding-agent-plugin-skeleton",
     }
 )
 _OWNER_ROUTES: Mapping[str, PurePosixPath] = MappingProxyType(
@@ -467,6 +471,7 @@ class RenderProvenance:
         repository_name: str,
         project_kind: str,
         project_description: str,
+        visibility: str,
     ) -> RenderProvenance:
         """Derive the pre-render provenance record from the exact approved inputs."""
         if cls is not RenderProvenance:
@@ -479,11 +484,14 @@ class RenderProvenance:
             raise ConfigurationError("render provenance repository name is outside approved routing")
         if type(project_kind) is not str or project_kind not in _PROJECT_KINDS:
             raise ConfigurationError("render provenance project kind is not an approved kind")
+        if type(visibility) is not str or visibility not in _VISIBILITIES:
+            raise ConfigurationError("render provenance visibility is not an approved visibility")
         _reject_unsafe_text(project_description, "render provenance project description", allow_empty=True)
         submitted_answers = (
             ("repository_owner", admitted_owner),
             ("repository_name", admitted_name),
             ("project_kind", project_kind),
+            ("visibility", visibility),
             ("project_description", project_description),
         )
         return cls(
@@ -1030,6 +1038,7 @@ class ProvisioningRequest:
     beads_prefix: str
     project_kind: ProjectKind
     description: str = ""
+    visibility: Visibility = "personal-only"
     destination_confirmation: str | None = None
     live_authorization: LiveAuthorization | None = None
     resume_authorization: LiveAuthorization | None = None

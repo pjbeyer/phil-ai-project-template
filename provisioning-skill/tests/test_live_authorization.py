@@ -645,7 +645,7 @@ class ExactAuthorizationTests(unittest.TestCase):
             "demo",
             "generic",
             "baseline",
-            str(destination),
+            destination_confirmation=str(destination),
         )
 
         self.assertRegex(request_fingerprint(matched, destination), r"^[0-9a-f]{64}$")
@@ -686,7 +686,7 @@ class ExactAuthorizationTests(unittest.TestCase):
             "demo",
             "generic",
             "baseline",
-            str(destination),
+            destination_confirmation=str(destination),
         )
         mismatched = replace(matched, destination_confirmation="/tmp/synthetic-other")
         with patch.object(Path, "resolve", side_effect=AssertionError("resolve called")) as resolve, patch.object(

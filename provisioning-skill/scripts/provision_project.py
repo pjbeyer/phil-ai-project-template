@@ -380,6 +380,8 @@ def _validate_gate(
             expected_markers.extend(
                 ["homebrew-actions-secret", "homebrew-first-package", "homebrew-lifecycle-tests"]
             )
+        elif request.project_kind == "coding-agent-plugin":
+            expected_markers.append("coding-agent-plugin-skeleton")
         for value, expected, label in (
             (payload["database"], database, "bootstrap database"),
             (payload["markers"], sorted(expected_markers), "bootstrap markers"),
@@ -908,6 +910,7 @@ class ControlledG01G03Controller:
             repository_name=origin.repository,
             project_kind=request.project_kind,
             project_description=request.description,
+            visibility=request.visibility,
         )
         evidence = ProvisioningEvidence(
             run_id=run_id,
@@ -1123,6 +1126,7 @@ class Provisioner:
                     self.adapter.append_manifest({
                         "path": str(destination), "prefix": request.beads_prefix,
                         "database": metadata["dolt_database"], "owner": origin.owner,
+                        "project_kind": request.project_kind, "visibility": request.visibility,
                         "profile": "default", "expected_remote": "origin", "expected_backup": True,
                         "expected_sync": "manual-dolt-remote", "owning_jobs": OWNING_JOBS,
                         "remote_health": "required", "restore_tier": "rotating",
@@ -1226,14 +1230,19 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Simulation-only project provisioning harness")
     parser.add_argument("--origin-url", required=True)
     parser.add_argument("--beads-prefix", required=True)
-    parser.add_argument("--project-kind", required=True, choices=["generic", "macos-cli", "homebrew-tap"])
+    parser.add_argument("--project-kind", required=True, choices=["generic", "macos-cli", "homebrew-tap", "coding-agent-plugin"])
+    parser.add_argument("--visibility", default="personal-only", choices=["personal-only", "work-internal", "open-source"])
     parser.add_argument("--description", default="")
     parser.add_argument("--destination-confirmation")
     parser.add_argument("--inspect-existing", action="store_true")
     args = parser.parse_args(argv)
     request = ProvisioningRequest(
-        args.origin_url, args.beads_prefix, args.project_kind, args.description,
-        args.destination_confirmation,
+        origin_url=args.origin_url,
+        beads_prefix=args.beads_prefix,
+        project_kind=args.project_kind,
+        description=args.description,
+        visibility=args.visibility,
+        destination_confirmation=args.destination_confirmation,
     )
     result = Provisioner(FakeAdapter()).run(request, existing=args.inspect_existing)
     payload = result.serializable()

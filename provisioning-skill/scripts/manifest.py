@@ -20,11 +20,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .vocabulary import DEFAULT_VISIBILITY, PROJECT_KIND_VALUES, VISIBILITY_VALUES
+
 REQUIRED = {
-    "path", "prefix", "database", "owner", "profile", "expected_remote", "expected_backup",
+    "path", "prefix", "database", "owner", "project_kind", "visibility", "profile",
+    "expected_remote", "expected_backup",
     "expected_sync", "owning_jobs", "remote_health", "restore_tier",
 }
-LEGACY_REQUIRED = REQUIRED - {"prefix"}
+# Existing records predating the project_kind/visibility fields still parse
+# (forward-compatible across the FR-030 version bump). The two new fields
+# default when absent and MUST be present on every newly appended record.
+LEGACY_REQUIRED = REQUIRED - {"prefix", "project_kind", "visibility"}
 OWNING_JOBS = {
     "Hermes: Beads health review",
     "Hermes: compliance audit",
@@ -50,7 +56,7 @@ APPROVED_SYNC_POLICIES = frozenset({
 APPROVED_REMOTE_HEALTH = frozenset({"required", "not-configured"})
 APPROVED_RESTORE_TIERS = frozenset({"rotating", "canonical"})
 # Existing records may carry these optional members in recognized shapes.
-OPTIONAL_RECORD_FIELDS = frozenset({"prefix", "remote_exception"})
+OPTIONAL_RECORD_FIELDS = frozenset({"prefix", "project_kind", "visibility", "remote_exception"})
 # The manifest ``owner`` field maps GitHub owner -> canonical manifest owner.
 MANIFEST_OWNER_VALUES = frozenset({"personal", "work"})
 _GITHUB_OWNER_TO_MANIFEST_OWNER = {
@@ -143,6 +149,10 @@ def validate_new_record(record: dict[str, Any]) -> None:
         _identity(record, key)
     if record["owner"] not in MANIFEST_OWNER_VALUES:
         raise ManifestError("new manifest record has an unrecognized owner value")
+    if record["project_kind"] not in PROJECT_KIND_VALUES:
+        raise ManifestError("new manifest record has an unrecognized project_kind value")
+    if record["visibility"] not in VISIBILITY_VALUES:
+        raise ManifestError("new manifest record has an unrecognized visibility value")
     if record["profile"] != "default" or record["expected_remote"] != "origin":
         raise ManifestError("new manifest record violates required profile or remote policy")
     if record["expected_backup"] is not True or record["expected_sync"] != "manual-dolt-remote":
@@ -196,6 +206,10 @@ def validate_records(records: list[dict[str, Any]]) -> None:
         database = _identity(record, "database")
         _identity(record, "owner")
         prefix = _identity(record, "prefix") if "prefix" in record else None
+        if "project_kind" in record and record["project_kind"] not in PROJECT_KIND_VALUES:
+            raise ManifestError("manifest record has an unrecognized project_kind value")
+        if "visibility" in record and record["visibility"] not in VISIBILITY_VALUES:
+            raise ManifestError("manifest record has an unrecognized visibility value")
         if path in paths or database in databases or (prefix is not None and prefix in prefixes):
             raise ManifestError("manifest path/prefix/database identity is not globally unique")
         if record["profile"] != "default" or record["expected_remote"] not in ("origin", None):

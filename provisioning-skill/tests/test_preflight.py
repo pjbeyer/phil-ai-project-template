@@ -26,6 +26,35 @@ class PreflightTests(unittest.TestCase):
         with self.assertRaises(PreflightError):
             normalize_request(ProvisioningRequest("https://github.com/pjbeyer/demo.git", "NO", "generic"), Path("/example"))
 
+    def test_coding_agent_plugin_kind_and_visibility_are_admitted(self) -> None:
+        request = ProvisioningRequest(
+            "https://github.com/pjbeyer/demo.git", "demo", "coding-agent-plugin",
+            visibility="work-internal",
+        )
+        origin, _ = normalize_request(request, Path("/example"))
+        self.assertEqual(origin.identity, "pjbeyer/demo")
+
+    def test_unrecognized_kind_and_visibility_fail_closed(self) -> None:
+        with self.assertRaises(PreflightError):
+            normalize_request(
+                ProvisioningRequest(
+                    "https://github.com/pjbeyer/demo.git", "demo", "not-a-kind"
+                ),
+                Path("/example"),
+            )
+        with self.assertRaises(PreflightError):
+            normalize_request(
+                ProvisioningRequest(
+                    "https://github.com/pjbeyer/demo.git", "demo", "generic",
+                    visibility="not-a-visibility",
+                ),
+                Path("/example"),
+            )
+
+    def test_visibility_defaults_to_personal_only(self) -> None:
+        request = ProvisioningRequest("https://github.com/pjbeyer/demo.git", "demo", "generic")
+        self.assertEqual(request.visibility, "personal-only")
+
     def test_unknown_owner_needs_confirmation(self) -> None:
         origin = parse_origin("https://github.com/other/demo.git")
         with self.assertRaises(PreflightError):

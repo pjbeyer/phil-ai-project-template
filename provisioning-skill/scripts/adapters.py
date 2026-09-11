@@ -253,6 +253,7 @@ class RenderMutationRequest:
     repository_name: str
     project_description: str
     project_kind: str
+    visibility: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -613,6 +614,7 @@ class ControlledG01G03Adapter:
             request.beads_prefix,
             request.project_kind,
             request.description,
+            request.visibility,
         )
         self._origin_snapshot = (origin.owner, origin.repository, origin.identity)
         self._g01_origin_snapshot: tuple[str, str, str, tuple[str, ...]] | None = None
@@ -911,6 +913,9 @@ class ControlledG01G03Adapter:
                 "Casks/.gitkeep",
                 ".github/workflows/tap-ci.yml",
             },
+            "coding-agent-plugin": {
+                "plugin-manifest.placeholder.json",
+            },
         }[self._request_snapshot[2]]
         try:
             files: set[str] = set()
@@ -949,6 +954,7 @@ class ControlledG01G03Adapter:
             "repository_name": self._origin_snapshot[1],
             "repository_owner": self._origin_snapshot[0],
             "template_revision": self._configuration.template_tag,
+            "visibility": self._request_snapshot[4],
         }
         if type(answers) is not dict or set(answers) != set(expected):
             raise AdapterError("Copier answers disk readback had an invalid exact shape")
@@ -1335,6 +1341,7 @@ class ControlledG01G03Adapter:
                     self._origin_snapshot[1],
                     self._request_snapshot[3],
                     self._request_snapshot[2],
+                    self._request_snapshot[4],
                 ),
                 RenderMutationRequest,
                 expect_empty=True,
@@ -2025,6 +2032,7 @@ class LiveAdapter:
             ("repository_name", origin.repository),
             ("project_description", request.description),
             ("project_kind", request.project_kind),
+            ("visibility", request.visibility),
             ("template_revision", config.template_tag),
         )
         rendered = executor.execute(

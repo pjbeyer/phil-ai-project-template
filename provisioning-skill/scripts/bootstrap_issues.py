@@ -18,6 +18,8 @@ def desired_issues(kind: ProjectKind) -> list[tuple[str, str]]:
             ("homebrew-actions-secret", "Confirm Homebrew Actions secret out of band"),
             ("homebrew-lifecycle-tests", "Add real Homebrew package lifecycle verification"),
         ])
+    if kind == "coding-agent-plugin":
+        issues.append(("coding-agent-plugin-skeleton", "Introduce the plugin skeleton and its operating contract"))
     return issues
 
 

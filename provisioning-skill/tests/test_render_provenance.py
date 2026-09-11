@@ -93,6 +93,7 @@ class RenderProvenanceValidationTests(unittest.TestCase):
                 repository_name="demo",
                 project_kind="not-a-kind",
                 project_description="",
+                visibility="personal-only",
             )
 
 

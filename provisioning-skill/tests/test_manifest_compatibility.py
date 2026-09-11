@@ -39,6 +39,8 @@ def manifest_record(
         "path": f"/synthetic/projects/{identity}",
         "database": f"{identity}_database",
         "owner": "personal",
+        "project_kind": "generic",
+        "visibility": "personal-only",
         "profile": "default",
         "expected_remote": expected_remote,
         "expected_backup": True,

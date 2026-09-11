@@ -145,6 +145,7 @@ class ControlledGateFixture:
             "repository_name": request.repository_name,
             "repository_owner": request.repository_owner,
             "template_revision": request.template_tag,
+            "visibility": request.visibility,
         }
         if self.render_answers_change is not None:
             key, value = self.render_answers_change
@@ -1277,6 +1278,7 @@ class ControlledG01G03Tests(unittest.TestCase):
             'repository_name: "demo"\n',
             'repository_owner: "pjbeyer"\n',
             'template_revision: "v0.1.3"\n',
+            'visibility: "personal-only"\n',
         ]
         _, home, evidence_dir, request, config, fixture, controller = self.make_case()
         fixture.render_answers_raw = "".join(valid_lines)
