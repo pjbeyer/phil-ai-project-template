@@ -12,6 +12,7 @@ import scripts.live_executor as live_executor
 from scripts.live_executor import (
     CentralDoltProbeRequest,
     ControlledLiveExecutor,
+    GitOriginVisibilityRequest,
     GitRemotePreflightRequest,
     LiveExecutorError,
     LiveOperation,
@@ -50,6 +51,58 @@ class ControlledLiveExecutorTests(unittest.TestCase):
             self.executor.execute(  # type: ignore[arg-type]
                 "git-remote-preflight",
                 GitRemotePreflightRequest("https://github.com/pjbeyer/demo.git"),
+            )
+        self.assertEqual(self.transport.calls, [])
+
+    def test_origin_anonymous_probe_builds_exact_read_only_argv(self) -> None:
+        result = self.executor.execute(
+            LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE,
+            GitOriginVisibilityRequest("https://github.com/pjbeyer/demo.git"),
+        )
+        request = self.invocation()
+        self.assertEqual(result, RawResult(0, "ok", ""))
+        self.assertEqual(
+            request.argv,  # type: ignore[attr-defined]
+            (
+                "git",
+                "-c", "credential.helper=",
+                "-c", "http.extraHeader=",
+                "-c", "http.followRedirects=false",
+                "-c", "protocol.allow=never",
+                "-c", "protocol.https.allow=always",
+                "ls-remote", "--symref",
+                "https://github.com/pjbeyer/demo.git", "HEAD",
+            ),
+        )
+        environment = dict(request.env)  # type: ignore[attr-defined]
+        self.assertEqual(request.cwd, Path("/"))  # type: ignore[attr-defined]
+        self.assertEqual(set(environment), live_executor.MINIMAL_ENVIRONMENT_KEYS)
+        self.assertEqual(environment["GIT_ASKPASS"], "/usr/bin/false")
+
+    def test_origin_anonymous_probe_is_credential_detached(self) -> None:
+        argv, _ = live_executor._origin_visibility_argv(
+            GitOriginVisibilityRequest("https://github.com/pjbeyer/demo.git")
+        )
+        # An env that re-enables ambient credentials must be rejected.
+        environment = dict(live_executor._FIXED_ENVIRONMENT)
+        environment["GIT_CONFIG_GLOBAL"] = ""  # drop the /dev/null guard
+        invocation = live_executor._TransportInvocation(
+            operation=LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE,
+            argv=argv,
+            cwd=live_executor.NEUTRAL_GIT_CWD,
+            env=environment,
+            timeout_seconds=live_executor.TIMEOUT_SECONDS,
+        )
+        with self.assertRaisesRegex(LiveExecutorError, "remote Git preflight"):
+            live_executor._validate_built_invocation(invocation)
+
+    def test_origin_authenticated_probe_fails_closed_until_regime_admitted(self) -> None:
+        # The credential-chain transport regime is not yet admitted; the
+        # authenticated probe must refuse rather than run anonymous.
+        with self.assertRaisesRegex(LiveExecutorError, "credential-chain"):
+            self.executor.execute(
+                LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+                GitOriginVisibilityRequest("https://github.com/pjbeyer/demo.git"),
             )
         self.assertEqual(self.transport.calls, [])
 
@@ -589,6 +642,8 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.GIT_PUSH,
                 LiveOperation.GIT_LS_REMOTE_MAIN,
                 LiveOperation.BD_DOLT_PUSH,
+                LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE,
+                LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
             },
         )
 

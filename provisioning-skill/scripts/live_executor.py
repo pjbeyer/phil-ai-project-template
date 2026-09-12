@@ -72,11 +72,25 @@ class LiveOperation(Enum):
     GIT_PUSH = "git-push"
     GIT_LS_REMOTE_MAIN = "git-ls-remote-main"
     BD_DOLT_PUSH = "bd-dolt-push"
+    GIT_ORIGIN_ANONYMOUS_LS_REMOTE = "git-origin-anonymous-ls-remote"
+    GIT_ORIGIN_AUTHENTICATED_LS_REMOTE = "git-origin-authenticated-ls-remote"
 
 
 @dataclass(frozen=True, slots=True)
 class GitRemotePreflightRequest:
     """Credential-free GitHub remote to identify and inspect for empty state."""
+
+    origin_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class GitOriginVisibilityRequest:
+    """A credential-free GitHub origin URL whose visibility is to be resolved.
+
+    One request type serves both probe regimes; the operation label chooses
+    anonymous (credential-detached) versus authenticated (credential-chain)
+    resolution. The URL carries no userinfo and names only approved owners.
+    """
 
     origin_url: str
 
@@ -569,6 +583,41 @@ def _reject_secret_or_unsafe_text(value: str, label: str) -> None:
 
 
 def _remote_argv(request: GitRemotePreflightRequest) -> tuple[tuple[str, ...], Path | None]:
+    _reject_secret_or_unsafe_text(request.origin_url, "origin URL")
+    parsed = urlparse(request.origin_url)
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise LiveExecutorError("origin URL must not contain credential userinfo")
+    match = _GITHUB_HTTPS.fullmatch(request.origin_url)
+    if match is None:
+        raise LiveExecutorError("origin must be a credential-free HTTPS github.com repository URL")
+    owner = match.group("owner")
+    repository = match.group("repository")
+    if owner not in _ALLOWED_OWNERS:
+        raise LiveExecutorError("origin owner is outside the approved owner set")
+    if repository in {".", ".."}:
+        raise LiveExecutorError("origin repository name is unsafe")
+    return (
+        "git",
+        "-c", "credential.helper=",
+        "-c", "http.extraHeader=",
+        "-c", "http.followRedirects=false",
+        "-c", "protocol.allow=never",
+        "-c", "protocol.https.allow=always",
+        "ls-remote", "--symref",
+        request.origin_url, "HEAD",
+    ), NEUTRAL_GIT_CWD
+
+
+def _origin_visibility_argv(request: GitOriginVisibilityRequest) -> tuple[tuple[str, ...], Path | None]:
+    """Build the origin-visibility ``git ls-remote`` argv.
+
+    Validation mirrors ``_remote_argv`` (credential-free approved HTTPS origin).
+    The argv is identical for both regimes; the environment selected in
+    ``_build_invocation`` distinguishes anonymous (detached) from authenticated
+    (credential-chain) resolution. Exit 0 on a public (or principal-readable)
+    origin; nonzero on a private/unreachable one — the adapter's parser maps the
+    pair of exit codes to a closed visibility result.
+    """
     _reject_secret_or_unsafe_text(request.origin_url, "origin URL")
     parsed = urlparse(request.origin_url)
     if parsed.username or parsed.password or "@" in parsed.netloc:
@@ -1151,10 +1200,15 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
             raise LiveExecutorError("controlled invocation environment value is not a string")
         if _SECRET_SHAPED.search(value) or "\x00" in value or "\n" in value or "\r" in value:
             raise LiveExecutorError("controlled invocation environment contains secret-shaped material")
-    if invocation.operation is LiveOperation.GIT_REMOTE_PREFLIGHT:
+    if invocation.operation in (
+        LiveOperation.GIT_REMOTE_PREFLIGHT,
+        LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE,
+    ):
         # Root terminates repository/config discovery.  The exact fixed env is
         # built from an allowlist (therefore no ambient GIT_DIR/GIT_WORK_TREE)
-        # and disables both system and global Git config.
+        # and disables both system and global Git config. The anonymous
+        # visibility probe shares this credential-detached regime (SC-014): a
+        # forged invocation must not run it with ambient credentials.
         if (
             invocation.cwd != NEUTRAL_GIT_CWD
             or not invocation.cwd.is_absolute()
@@ -1333,6 +1387,20 @@ def _build_invocation(
         if type(parameters) is not GitRemotePreflightRequest:
             raise LiveExecutorError("live operation received the wrong request type")
         argv, cwd = _remote_argv(parameters)
+    elif operation is LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE:
+        if type(parameters) is not GitOriginVisibilityRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _origin_visibility_argv(parameters)
+    elif operation is LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE:
+        if type(parameters) is not GitOriginVisibilityRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        # The credential-chain transport regime does not yet exist (see Slice L
+        # contract finding); refuse to build a probe that would silently run
+        # anonymous and misclassify a private origin as unreachable.
+        raise LiveExecutorError(
+            "origin-visibility authenticated probe requires the credential-chain "
+            "transport regime, not yet admitted"
+        )
     elif operation is LiveOperation.LOCAL_GIT_READBACK:
         if type(parameters) is not LocalGitReadbackRequest:
             raise LiveExecutorError("live operation received the wrong request type")

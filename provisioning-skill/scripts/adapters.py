@@ -53,6 +53,7 @@ from .live_executor import (
     GitDiffCachedNamesRequest,
     GitDiffCachedTextRequest,
     GitLsRemoteMainRequest,
+    GitOriginVisibilityRequest,
     GitPushRequest,
     GitRemotePreflightRequest,
     GitRemoteReadbackRequest,
@@ -60,6 +61,7 @@ from .live_executor import (
     GitStatusAllRequest,
     GitStatusBranchRequest,
     GitTemplateRevisionRequest,
+    LiveExecutorError,
     LiveOperation,
     SpeckitExtensionAddRequest,
     SpeckitInitRequest,
@@ -72,6 +74,11 @@ from .publish_hygiene import (
     non_open_source_requires_private,
     require_publish_hygiene,
     scan_published_surface,
+)
+from .origin_visibility import (
+    OriginVisibility,
+    VisibilityResolutionError,
+    resolve_origin_visibility,
 )
 from .models import (
     ConfigurationError,
@@ -2660,14 +2667,42 @@ class LiveAdapter:
         )
         require_publish_hygiene(result)
 
-        # FR-007: a non-open-source request whose origin is publicly visible
-        # must stop before push. Until the authenticated origin-visibility probe
-        # is admitted, fail closed on every non-open-source visibility.
-        if non_open_source_requires_private(request.visibility):
-            raise AdapterError(
-                "non-open-source visibility requires a proven private origin; "
-                "origin-visibility probe is not yet admitted to the transport allowlist"
+        # FR-007 (FR-031): resolve origin GitHub visibility through the two
+        # probes and enforce the G11 pre-push gate. The anonymous probe is
+        # wired; the authenticated probe requires the credential-chain transport
+        # regime, which is not yet admitted, so it fails closed below rather
+        # than run anonymous and misclassify a private origin as unreachable.
+        executor = self._production_executor()
+        anonymous = executor.execute(
+            LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE,
+            GitOriginVisibilityRequest(request.origin_url),
+        )
+        anonymous_ok = anonymous.returncode == 0
+        try:
+            authenticated = executor.execute(
+                LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+                GitOriginVisibilityRequest(request.origin_url),
             )
+        except LiveExecutorError as error:
+            raise AdapterError(
+                "origin-visibility probe cannot complete: "
+                f"{error}"
+            ) from error
+        authenticated_ok = authenticated.returncode == 0
+        try:
+            resolved = resolve_origin_visibility(anonymous_ok, authenticated_ok)
+        except VisibilityResolutionError as error:
+            raise AdapterError(f"origin visibility resolution failed: {error}") from error
+        if resolved is OriginVisibility.UNREACHABLE:
+            raise AdapterError("origin visibility could not be resolved (unreachable)")
+        if request.visibility == "open-source":
+            if resolved is not OriginVisibility.PUBLIC:
+                raise AdapterError("open-source request requires a public origin")
+        elif non_open_source_requires_private(request.visibility):
+            if resolved is not OriginVisibility.PRIVATE:
+                raise AdapterError(
+                    f"{request.visibility} request requires a private origin"
+                )
 
     def _g11(self) -> None:
         _, _, destination, _ = self._context()
