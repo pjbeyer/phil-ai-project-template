@@ -36,6 +36,16 @@ class RecordingTransport:
 class ControlledLiveExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path("/Users/synthetic-tester")
+        # The route proof in _validate_checkout_path_argument resolves the
+        # authoritative approved project home from env/config (not the
+        # invocation); the fixture mirrors production, where the executor binds
+        # approved_home = _approved_project_home(). Dest literals in this
+        # module are under /tmp/synthetic-home, so pin that as the approved home.
+        self._home_patch = patch.dict(
+            "os.environ", {"PROVISIONING_APPROVED_HOME": "/tmp/synthetic-home"}
+        )
+        self._home_patch.start()
+        self.addCleanup(self._home_patch.stop)
         self.transport = RecordingTransport()
         self.executor = ControlledLiveExecutor(
             transport=self.transport,
@@ -1332,6 +1342,23 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                     good_push.env,
                 )
             )
+        # Lexical-suffix bypass (HIGH finding): a forged path that ENDS in
+        # Projects/<owner-root>/<repo> but is NOT under the approved home must
+        # be rejected by the anchored route proof, not pass a suffix test.
+        for label, attacker in (
+            ("/tmp lexical suffix", "/tmp/evil/Projects/pjbeyer/r"),
+            ("/Users/attacker lexical suffix", "/Users/attacker/Projects/pjbeyer/r"),
+        ):
+            with self.subTest(label=label), self.assertRaises(LiveExecutorError):
+                _validate_built_invocation(
+                    forged(
+                        LiveOperation.GIT_PUSH,
+                        ("git", "--no-optional-locks", "-C", attacker,
+                         "push", "--set-upstream", "origin", "main"),
+                        Path(attacker),
+                        good_push.env,
+                    )
+                )
         # GIT_PUSH: -C destination disagrees with cwd.
         with self.assertRaises(LiveExecutorError):
             _validate_built_invocation(

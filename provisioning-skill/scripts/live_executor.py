@@ -699,15 +699,16 @@ def _validate_origin_url_argument(argument: str) -> None:
 
 
 def _validate_checkout_path_argument(argument: str) -> None:
-    """Re-validate a destination-style argv slot at the validator boundary.
+    """Re-validate a destination-style argv slot against the approved route.
 
-    Mirrors the builders' destination checks (absolute, traversal-free,
-    no secret/unsafe material) and adds the owner-route proof, so a forged
-    ``-C <path>`` or clone destination cannot redirect git into an
-    attacker-prepared repository whose ``origin`` remote points at an
-    attacker URL (credential exfiltration). A provisioned checkout is always
-    the direct child of a ``Projects/<owner-root>`` directory; the owner
-    roots derive from ``_OWNER_ROOTS`` so the two can never drift apart.
+    Anchors to the authoritative approved project home — the same source the
+    executor binds (``models._approved_project_home()``) — and proves the
+    resolved path is that home's direct ``Projects/<owner-root>/<repo>`` child,
+    mirroring ``_local_git_argv``'s resolve-containment proof. A lexical
+    ``Projects/<owner-root>`` suffix is NOT sufficient: a forged path like
+    ``/tmp/evil/Projects/pjbeyer/r`` would pass a suffix-only check and let git
+    authenticate to an attacker-controlled repository. The home is resolved
+    authoritatively (env/config), never from the invocation.
     """
     _reject_secret_or_unsafe_text(argument, "checkout destination")
     path = Path(argument)
@@ -715,8 +716,23 @@ def _validate_checkout_path_argument(argument: str) -> None:
         raise LiveExecutorError("checkout destination must be an absolute path")
     if ".." in path.parts:
         raise LiveExecutorError("checkout destination path traversal is forbidden")
-    owner_dirs = frozenset(root.parts[-1] for root in _OWNER_ROOTS.values())
-    if len(path.parts) < 3 or path.parts[-3] != "Projects" or path.parts[-2] not in owner_dirs:
+    from .models import _approved_project_home
+
+    approved_home = _approved_project_home()
+    resolved_home = approved_home.resolve(strict=False)
+    resolved_path = path.resolve(strict=False)
+    try:
+        relative = resolved_path.relative_to(resolved_home)
+    except ValueError as error:
+        raise LiveExecutorError(
+            "checkout destination resolves outside the approved project home"
+        ) from error
+    owner_dirs = frozenset(Path(root).parts[-1] for root in _OWNER_ROOTS.values())
+    if (
+        len(relative.parts) != 3
+        or relative.parts[0] != "Projects"
+        or relative.parts[1] not in owner_dirs
+    ):
         raise LiveExecutorError("checkout destination is outside the approved owner route")
 
 
