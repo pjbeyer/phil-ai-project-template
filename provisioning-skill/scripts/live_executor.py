@@ -14,6 +14,7 @@ Two seams live here:
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -542,6 +543,55 @@ _FIXED_ENVIRONMENT = MappingProxyType(
     }
 )
 
+# The three operations that must actually authenticate to a private origin:
+# the authenticated origin-visibility probe, clone, and push. Everything else
+# (including GIT_REMOTE_PREFLIGHT and the anonymous visibility probe) stays on
+# the detached _FIXED_ENVIRONMENT.
+_CREDENTIAL_CHAIN_OPERATIONS = frozenset(
+    {
+        LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+        LiveOperation.GIT_CLONE,
+        LiveOperation.GIT_PUSH,
+    }
+)
+
+
+def _credential_chain_environment() -> Mapping[str, str]:
+    """Build the credential-chain regime for the authenticated git operations.
+
+    Distinct from ``_FIXED_ENVIRONMENT``: it preserves the operator's real
+    ``HOME`` and omits every credential-suppression guard present in the fixed
+    env (no ``GIT_ASKPASS=/usr/bin/false``, no ``GIT_CONFIG_GLOBAL=/dev/null``,
+    no ``GIT_CONFIG_NOSYSTEM=1``), so git resolves the operator's configured
+    ``credential.helper`` chain. It is still built exclusively from the
+    minimal-env allowlist, still carries no credential value (a home path is not
+    secret-shaped), and the shared validator re-checks every value before spawn.
+    """
+    home = os.environ.get("HOME") or str(Path.home())
+    environment = {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "HOME": home,
+        # Anti-prompt guards only — these do NOT block the credential.helper
+        # chain (that is what GIT_ASKPASS/=/usr/bin/false and GIT_CONFIG_GLOBAL=
+        # /dev/null were suppressing, and both are deliberately absent here).
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+    for key, value in environment.items():
+        if (
+            not isinstance(value, str)
+            or _SECRET_SHAPED.search(value)
+            or "\x00" in value
+            or "\n" in value
+            or "\r" in value
+        ):
+            raise LiveExecutorError(
+                f"credential-chain environment {key!r} contains secret-shaped or invalid material"
+            )
+    return MappingProxyType(environment)
+
 
 def _minimal_environment(controlled: Mapping[str, str], *, program: str) -> Mapping[str, str]:
     """Copy only controlled non-secret keys; clear Beads overrides only for bd."""
@@ -608,15 +658,20 @@ def _remote_argv(request: GitRemotePreflightRequest) -> tuple[tuple[str, ...], P
     ), NEUTRAL_GIT_CWD
 
 
-def _origin_visibility_argv(request: GitOriginVisibilityRequest) -> tuple[tuple[str, ...], Path | None]:
+def _origin_visibility_argv(
+    request: GitOriginVisibilityRequest,
+    *,
+    detached: bool = True,
+) -> tuple[tuple[str, ...], Path | None]:
     """Build the origin-visibility ``git ls-remote`` argv.
 
     Validation mirrors ``_remote_argv`` (credential-free approved HTTPS origin).
-    The argv is identical for both regimes; the environment selected in
-    ``_build_invocation`` distinguishes anonymous (detached) from authenticated
-    (credential-chain) resolution. Exit 0 on a public (or principal-readable)
-    origin; nonzero on a private/unreachable one — the adapter's parser maps the
-    pair of exit codes to a closed visibility result.
+    ``detached=True`` (the anonymous probe) adds ``credential.helper=`` and
+    ``http.extraHeader=`` so no ambient auth can leak into the read; the
+    credential-chain regime runs on ``detached=False``, which omits both so git
+    resolves the operator's configured ``credential.helper``. Exit 0 on a public
+    (or principal-readable) origin; nonzero on a private/unreachable one — the
+    adapter's parser maps the pair of exit codes to a closed visibility result.
     """
     _reject_secret_or_unsafe_text(request.origin_url, "origin URL")
     parsed = urlparse(request.origin_url)
@@ -631,16 +686,17 @@ def _origin_visibility_argv(request: GitOriginVisibilityRequest) -> tuple[tuple[
         raise LiveExecutorError("origin owner is outside the approved owner set")
     if repository in {".", ".."}:
         raise LiveExecutorError("origin repository name is unsafe")
-    return (
-        "git",
-        "-c", "credential.helper=",
-        "-c", "http.extraHeader=",
+    argv: list[str] = ["git"]
+    if detached:
+        argv += ["-c", "credential.helper=", "-c", "http.extraHeader="]
+    argv += [
         "-c", "http.followRedirects=false",
         "-c", "protocol.allow=never",
         "-c", "protocol.https.allow=always",
         "ls-remote", "--symref",
         request.origin_url, "HEAD",
-    ), NEUTRAL_GIT_CWD
+    ]
+    return tuple(argv), NEUTRAL_GIT_CWD
 
 
 def _local_git_argv(request: LocalGitReadbackRequest, home: Path) -> tuple[tuple[str, ...], Path]:
@@ -1394,13 +1450,7 @@ def _build_invocation(
     elif operation is LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE:
         if type(parameters) is not GitOriginVisibilityRequest:
             raise LiveExecutorError("live operation received the wrong request type")
-        # The credential-chain transport regime does not yet exist (see Slice L
-        # contract finding); refuse to build a probe that would silently run
-        # anonymous and misclassify a private origin as unreachable.
-        raise LiveExecutorError(
-            "origin-visibility authenticated probe requires the credential-chain "
-            "transport regime, not yet admitted"
-        )
+        argv, cwd = _origin_visibility_argv(parameters, detached=False)
     elif operation is LiveOperation.LOCAL_GIT_READBACK:
         if type(parameters) is not LocalGitReadbackRequest:
             raise LiveExecutorError("live operation received the wrong request type")
@@ -1549,6 +1599,13 @@ def _build_invocation(
                 raise LiveExecutorError("coverage audit environment contains invalid material")
         env = MappingProxyType(environment)
         timeout = 30
+    elif operation in _CREDENTIAL_CHAIN_OPERATIONS:
+        # The three authenticated git operations (visibility probe, clone, push)
+        # resolve the operator's credential.helper chain. Built exclusively from
+        # the minimal-env allowlist with no credential value; still re-checked by
+        # the shared validator before spawn.
+        env = _credential_chain_environment()
+        timeout = TIMEOUT_SECONDS
     else:
         env = _minimal_environment(_FIXED_ENVIRONMENT, program=argv[0])
         timeout = TIMEOUT_SECONDS

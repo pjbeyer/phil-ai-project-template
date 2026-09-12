@@ -8,11 +8,16 @@ runs.
 
 Credential scoping: this transport never obtains, holds, or passes a credential
 value. Git resolves credentials through the operator's configured
-``credential.helper`` chain (``osxkeychain`` → ``git-credential-gh-env``); any
-non-git secret arrives only via the operator's already-resolved environment,
-which is still passed through the minimal-env allowlist and secret-shaped
-rejection in ``live_executor.py`` before a subprocess is spawned. A missing or
-invalid credential surfaces as a nonzero exit, never as a secret leak.
+``credential.helper`` chain only for the three credential-chain operations
+(``GIT_ORIGIN_AUTHENTICATED_LS_REMOTE``, ``GIT_CLONE``, ``GIT_PUSH``), which
+run under a minimal environment that preserves the real ``HOME`` and omits the
+credential-suppression guards. Every other operation (preflight, anonymous
+visibility probe, readbacks) runs under the detached ``_FIXED_ENVIRONMENT``
+(``HOME=/var/empty``, ``GIT_ASKPASS=/usr/bin/false``) and cannot reach the
+credential store. No non-git secret arrives via the operator's environment,
+which still passes the minimal-env allowlist and secret-shaped rejection in
+``live_executor.py`` before a subprocess is spawned. A missing or invalid
+credential surfaces as a nonzero exit, never as a secret leak.
 
 The inode-bound no-follow cwd capability closes the ``LOCAL_GIT_READBACK``
 TOCTOU: the working directory is opened with ``O_NOFOLLOW | O_DIRECTORY`` and

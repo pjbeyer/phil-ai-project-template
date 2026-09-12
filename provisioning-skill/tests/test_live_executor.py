@@ -54,6 +54,56 @@ class ControlledLiveExecutorTests(unittest.TestCase):
             )
         self.assertEqual(self.transport.calls, [])
 
+    def test_credential_chain_ops_route_to_credential_chain_environment(self) -> None:
+        from scripts.live_executor import (
+            GitCloneRequest,
+            GitPushRequest,
+            _build_invocation,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        cases = (
+            (
+                LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+                GitOriginVisibilityRequest("https://github.com/pjbeyer/demo.git"),
+            ),
+            (
+                LiveOperation.GIT_CLONE,
+                GitCloneRequest("https://github.com/pjbeyer/demo.git", dest),
+            ),
+            (LiveOperation.GIT_PUSH, GitPushRequest(dest)),
+        )
+        for operation, params in cases:
+            with self.subTest(operation=operation):
+                invocation = _build_invocation(operation, params, self.home)
+                env = dict(invocation.env)
+                # Credential-chain regime: real HOME, no credential-suppression.
+                self.assertNotEqual(env.get("HOME"), "/var/empty")
+                self.assertNotIn("GIT_ASKPASS", env)
+                self.assertNotIn("GIT_CONFIG_GLOBAL", env)
+                self.assertNotIn("GIT_CONFIG_NOSYSTEM", env)
+
+    def test_anonymous_probe_stays_on_detached_environment(self) -> None:
+        from scripts.live_executor import _build_invocation
+
+        invocation = _build_invocation(
+            LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE,
+            GitOriginVisibilityRequest("https://github.com/pjbeyer/demo.git"),
+            self.home,
+        )
+        env = dict(invocation.env)
+        self.assertEqual(env.get("HOME"), "/var/empty")
+        self.assertEqual(env.get("GIT_ASKPASS"), "/usr/bin/false")
+        self.assertEqual(env.get("GIT_CONFIG_GLOBAL"), "/dev/null")
+        self.assertEqual(env.get("GIT_CONFIG_NOSYSTEM"), "1")
+
+    def test_credential_chain_environment_rejects_secret_shaped_home(self) -> None:
+        from scripts.live_executor import _credential_chain_environment
+
+        with patch.dict("os.environ", {"HOME": "ghp_abcdefghijklmnopqrstuvwxyz012345"}):
+            with self.assertRaisesRegex(LiveExecutorError, "secret-shaped"):
+                _credential_chain_environment()
+
     def test_origin_anonymous_probe_builds_exact_read_only_argv(self) -> None:
         result = self.executor.execute(
             LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE,
@@ -96,15 +146,27 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         with self.assertRaisesRegex(LiveExecutorError, "remote Git preflight"):
             live_executor._validate_built_invocation(invocation)
 
-    def test_origin_authenticated_probe_fails_closed_until_regime_admitted(self) -> None:
-        # The credential-chain transport regime is not yet admitted; the
-        # authenticated probe must refuse rather than run anonymous.
-        with self.assertRaisesRegex(LiveExecutorError, "credential-chain"):
-            self.executor.execute(
-                LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
-                GitOriginVisibilityRequest("https://github.com/pjbeyer/demo.git"),
-            )
-        self.assertEqual(self.transport.calls, [])
+    def test_origin_authenticated_probe_uses_credential_chain_and_omits_helper_disable(self) -> None:
+        # With the credential-chain regime admitted, the authenticated probe now
+        # builds (builds exact argv omitting the credential.helper= disable) and
+        # resolves to the credential-chain environment (real HOME, no refresh
+        # guards). It no longer fails closed with a "credential-chain" error.
+        result = self.executor.execute(
+            LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+            GitOriginVisibilityRequest("https://github.com/pjbeyer/demo.git"),
+        )
+        request = self.invocation()
+        self.assertEqual(result, RawResult(0, "ok", ""))
+        # The authenticated probe must NOT carry the credential.helper= disable.
+        self.assertNotIn("credential.helper=", request.argv)  # type: ignore[attr-defined]
+        self.assertEqual(request.argv[0], "git")  # type: ignore[attr-defined]
+        environment = dict(request.env)  # type: ignore[attr-defined]
+        # Real HOME (not /var/empty), no GIT_ASKPASS=/usr/bin/false, no
+        # GIT_CONFIG_GLOBAL=/dev/null, no GIT_CONFIG_NOSYSTEM=1.
+        self.assertNotEqual(environment.get("HOME"), "/var/empty")
+        self.assertNotIn("GIT_ASKPASS", environment)
+        self.assertNotIn("GIT_CONFIG_GLOBAL", environment)
+        self.assertNotIn("GIT_CONFIG_NOSYSTEM", environment)
 
     def test_operation_requires_its_exact_typed_request(self) -> None:
         with self.assertRaisesRegex(LiveExecutorError, "request type"):

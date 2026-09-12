@@ -55,7 +55,6 @@ from .live_executor import (
     GitLsRemoteMainRequest,
     GitOriginVisibilityRequest,
     GitPushRequest,
-    GitRemotePreflightRequest,
     GitRemoteReadbackRequest,
     GitRevParseHeadRequest,
     GitStatusAllRequest,
@@ -1870,15 +1869,18 @@ class LiveAdapter:
     def _origin_probe(self, operation: str) -> None:
         request, _, _, _ = self._context()
         executor = self._production_executor()
+        # Empty-origin/writability preflight runs through the credential-chain
+        # regime so a private empty origin is admitted (an anonymous probe cannot
+        # see a private repo at all — see Slice L finding pjb-m0ap.3.21).
         probe = executor.execute(
-            LiveOperation.GIT_REMOTE_PREFLIGHT,
-            GitRemotePreflightRequest(request.origin_url),
+            LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+            GitOriginVisibilityRequest(request.origin_url),
         )
         if probe.returncode != 0:
             detail = _SECRET.sub("[REDACTED]", probe.stderr or probe.stdout or "no diagnostic")
             raise AdapterError(f"{operation} failed with exit {probe.returncode}: {detail[:500]}")
-        # A credential-free empty origin emits no commit SHA; any full 40-hex SHA
-        # in the symref output means the origin already carries refs (FR-007).
+        # An empty origin emits no commit SHA; any full 40-hex SHA in the symref
+        # output means the origin already carries refs (FR-007).
         _parse_git_ls_remote_empty(probe.stdout)
 
     def _repository_readback(self, operation: str, *, empty: bool | None = None) -> Mapping[str, Any]:
