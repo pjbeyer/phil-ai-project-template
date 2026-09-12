@@ -142,6 +142,74 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         with self.assertRaisesRegex(LiveExecutorError, "closed key set"):
             _validate_built_invocation(forged)
 
+    def test_credential_chain_invocation_rejects_forged_path_and_home(self) -> None:
+        from scripts.live_executor import (
+            _TransportInvocation,
+            _build_invocation,
+            _validate_built_invocation,
+            GitPushRequest,
+        )
+
+        invocation = _build_invocation(
+            LiveOperation.GIT_PUSH,
+            GitPushRequest(Path("/tmp/synthetic-home/Projects/pjbeyer/demo")),
+            self.home,
+        )
+        # A forged invocation must not substitute a shadowing PATH or a
+        # different HOME even though the key set is unchanged.
+        for key, value in (
+            ("PATH", "/tmp/attacker:/usr/bin:/bin"),
+            ("HOME", "/tmp/attacker-home"),
+        ):
+            with self.subTest(key=key):
+                forged_env = dict(invocation.env)
+                forged_env[key] = value
+                forged = _TransportInvocation(
+                    operation=LiveOperation.GIT_PUSH,
+                    argv=invocation.argv,
+                    cwd=invocation.cwd,
+                    env=forged_env,
+                    timeout_seconds=invocation.timeout_seconds,
+                    shell=False,
+                )
+                with self.assertRaisesRegex(LiveExecutorError, "not the"):  # PINNED-HOME/PATH msg
+                    _validate_built_invocation(forged)
+
+    def test_authenticated_probe_rejects_forged_origin_url(self) -> None:
+        from scripts.live_executor import (
+            _TransportInvocation,
+            _build_invocation,
+            _validate_built_invocation,
+        )
+
+        good = _build_invocation(
+            LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+            GitOriginVisibilityRequest("https://github.com/pjbeyer/demo.git"),
+            self.home,
+        )
+        for bad_url in (
+            "https://evil.com/x.git",
+            "https://user:pass@github.com/pjbeyer/demo.git",
+        ):
+            with self.subTest(bad_url=bad_url):
+                forged = _TransportInvocation(
+                    operation=LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+                    argv=(
+                        "git",
+                        "-c", "http.followRedirects=false",
+                        "-c", "protocol.allow=never",
+                        "-c", "protocol.https.allow=always",
+                        "ls-remote", "--symref",
+                        bad_url, "HEAD",
+                    ),
+                    cwd=good.cwd,
+                    env=good.env,
+                    timeout_seconds=good.timeout_seconds,
+                    shell=False,
+                )
+                with self.assertRaises(LiveExecutorError):
+                    _validate_built_invocation(forged)
+
     def test_authenticated_probe_argv_is_exact_shape_pinned(self) -> None:
         from scripts.live_executor import (
             _TransportInvocation,

@@ -572,6 +572,11 @@ _CREDENTIAL_CHAIN_ENV_KEYS = frozenset(
         "GIT_OPTIONAL_LOCKS",
     }
 )
+# The credential-chain regime trusts PATH to resolve ``git`` (and, transitively,
+# ``git-remote-https`` / the credential helper), so PATH is pinned to an exact
+# value at the validation boundary — a forged PATH that shadows ``git`` with a
+# malicious binary must not survive re-validation.
+_CREDENTIAL_CHAIN_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 
 def _credential_chain_home() -> str:
@@ -607,7 +612,7 @@ def _credential_chain_environment() -> Mapping[str, str]:
     """
     home = _credential_chain_home()
     environment = {
-        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH": _CREDENTIAL_CHAIN_PATH,
         "LANG": "C",
         "LC_ALL": "C",
         "HOME": home,
@@ -1333,6 +1338,15 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
         # discovery only.
         if set(invocation.env) != _CREDENTIAL_CHAIN_ENV_KEYS:
             raise LiveExecutorError("credential-chain environment is not the closed key set")
+        # The key set is closed, but the VALUES of PATH and HOME are also
+        # caller-falsifiable on a forged invocation: PATH must remain the exact
+        # pinned path (a shadowed ``git`` resolves a malicious binary), and HOME
+        # must remain the authoritative passwd home (a substituted HOME re-opens
+        # the credential.helper injection channel). Pin both exactly.
+        if invocation.env.get("PATH") != _CREDENTIAL_CHAIN_PATH:
+            raise LiveExecutorError("credential-chain PATH is not the pinned value")
+        if invocation.env.get("HOME") != _credential_chain_home():
+            raise LiveExecutorError("credential-chain HOME is not the authoritative account home")
         if "GIT_DIR" in invocation.env or "GIT_WORK_TREE" in invocation.env:
             raise LiveExecutorError("credential-chain environment must not redirect discovery")
         if "_CREDENTIAL_CHAIN_DISALLOWED" in invocation.env:  # pragma: no cover - defensive
@@ -1341,9 +1355,9 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
         # anonymous probe (15 tokens incl. the helper disables), the
         # authenticated probe omits both `-c credential.helper=` and
         # `-c http.extraHeader=`, so it is exactly 11 tokens with the same
-        # closed suffixes; argv[9] is the already-validated origin URL. The
-        # operation label is caller-suppliable, so pin the shape rather than
-        # trusting the label.
+        # closed suffixes; argv[9] is the origin URL. The operation label is
+        # caller-suppliable, so pin the shape AND re-validate argv[9] rather than
+        # trusting the label or a prior builder.
         if invocation.operation is LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE:
             argv = invocation.argv
             if (
@@ -1364,6 +1378,22 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
                 raise LiveExecutorError(
                     "authenticated origin-visibility argv does not match the exact constructed shape"
                 )
+            # argv[9] is the origin URL; re-reject secret-shaped/userinfo-bearing
+            # material and re-confirm it names an approved HTTPS owner/repository,
+            # mirroring _origin_visibility_argv so a forged URL cannot slide past
+            # the shape-only pin.
+            origin_url = argv[9]
+            _reject_secret_or_unsafe_text(origin_url, "origin URL")
+            parsed_url = urlparse(origin_url)
+            if parsed_url.username or parsed_url.password or "@" in parsed_url.netloc:
+                raise LiveExecutorError("origin URL must not contain credential userinfo")
+            url_match = _GITHUB_HTTPS.fullmatch(origin_url)
+            if url_match is None:
+                raise LiveExecutorError("origin must be a credential-free HTTPS github.com repository URL")
+            if url_match.group("owner") not in _ALLOWED_OWNERS:
+                raise LiveExecutorError("origin owner is outside the approved owner set")
+            if url_match.group("repository") in {".", ".."}:
+                raise LiveExecutorError("origin repository name is unsafe")
     if invocation.argv[0] == "bd" and set(invocation.env) & _BEADS_ENV_KEYS:
         raise LiveExecutorError("Beads Dolt overrides must be absent from bd operations")
 
