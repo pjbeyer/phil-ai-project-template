@@ -1,0 +1,16 @@
+provisioning-skill/scripts/live_executor.py
+  h_c5be3b3dad7ca8 702-711,719-735
+provisioning-skill/tests/test_live_executor.py
+  h_c5be3b3dad7ca8 39-48,1345-1361
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.7.6",
+  "base_commit_sha": "24321a0194fb451b7fae70009e55fa2fbcf61ed2",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
