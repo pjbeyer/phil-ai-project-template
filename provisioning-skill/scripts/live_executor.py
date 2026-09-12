@@ -677,6 +677,49 @@ def _reject_secret_or_unsafe_text(value: str, label: str) -> None:
         raise LiveExecutorError(f"{label} contains an unsafe flag or operation")
 
 
+def _validate_origin_url_argument(argument: str) -> None:
+    """Re-validate an origin-URL argv slot at the validator boundary.
+
+    Shared by the authenticated-probe and GIT_CLONE argv pins so a forged URL
+    (credential userinfo, unapproved owner, non-GitHub host, ssh scheme, or
+    ``.``/``..`` repository name) cannot slide past a shape-only pin. Mirrors
+    the validation the builders perform, without trusting that a builder ran.
+    """
+    _reject_secret_or_unsafe_text(argument, "origin URL")
+    parsed_url = urlparse(argument)
+    if parsed_url.username or parsed_url.password or "@" in parsed_url.netloc:
+        raise LiveExecutorError("origin URL must not contain credential userinfo")
+    url_match = _GITHUB_HTTPS.fullmatch(argument)
+    if url_match is None:
+        raise LiveExecutorError("origin must be a credential-free HTTPS github.com repository URL")
+    if url_match.group("owner") not in _ALLOWED_OWNERS:
+        raise LiveExecutorError("origin owner is outside the approved owner set")
+    if url_match.group("repository") in {".", ".."}:
+        raise LiveExecutorError("origin repository name is unsafe")
+
+
+def _validate_checkout_path_argument(argument: str) -> None:
+    """Re-validate a destination-style argv slot at the validator boundary.
+
+    Mirrors the builders' destination checks (absolute, traversal-free,
+    no secret/unsafe material) and adds the owner-route proof, so a forged
+    ``-C <path>`` or clone destination cannot redirect git into an
+    attacker-prepared repository whose ``origin`` remote points at an
+    attacker URL (credential exfiltration). A provisioned checkout is always
+    the direct child of a ``Projects/<owner-root>`` directory; the owner
+    roots derive from ``_OWNER_ROOTS`` so the two can never drift apart.
+    """
+    _reject_secret_or_unsafe_text(argument, "checkout destination")
+    path = Path(argument)
+    if not path.is_absolute():
+        raise LiveExecutorError("checkout destination must be an absolute path")
+    if ".." in path.parts:
+        raise LiveExecutorError("checkout destination path traversal is forbidden")
+    owner_dirs = frozenset(root.parts[-1] for root in _OWNER_ROOTS.values())
+    if len(path.parts) < 3 or path.parts[-3] != "Projects" or path.parts[-2] not in owner_dirs:
+        raise LiveExecutorError("checkout destination is outside the approved owner route")
+
+
 def _remote_argv(request: GitRemotePreflightRequest) -> tuple[tuple[str, ...], Path | None]:
     _reject_secret_or_unsafe_text(request.origin_url, "origin URL")
     parsed = urlparse(request.origin_url)
@@ -1351,13 +1394,10 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
             raise LiveExecutorError("credential-chain environment must not redirect discovery")
         if "_CREDENTIAL_CHAIN_DISALLOWED" in invocation.env:  # pragma: no cover - defensive
             raise LiveExecutorError("credential-chain environment carries a disallowed key")
-        # Pin the authenticated probe's exact read-only argv. Unlike the
-        # anonymous probe (15 tokens incl. the helper disables), the
-        # authenticated probe omits both `-c credential.helper=` and
-        # `-c http.extraHeader=`, so it is exactly 11 tokens with the same
-        # closed suffixes; argv[9] is the origin URL. The operation label is
-        # caller-suppliable, so pin the shape AND re-validate argv[9] rather than
-        # trusting the label or a prior builder.
+        # Pin each credential-chain operation's exact argv, re-validating the
+        # dynamic slots (origin URL, destination) at the validator boundary so a
+        # forged invocation labeled GIT_CLONE/GIT_PUSH/authenticated-probe cannot
+        # smuggle an attacker origin or checkout path past a shape-only check.
         if invocation.operation is LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE:
             argv = invocation.argv
             if (
@@ -1379,21 +1419,33 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
                     "authenticated origin-visibility argv does not match the exact constructed shape"
                 )
             # argv[9] is the origin URL; re-reject secret-shaped/userinfo-bearing
-            # material and re-confirm it names an approved HTTPS owner/repository,
-            # mirroring _origin_visibility_argv so a forged URL cannot slide past
-            # the shape-only pin.
-            origin_url = argv[9]
-            _reject_secret_or_unsafe_text(origin_url, "origin URL")
-            parsed_url = urlparse(origin_url)
-            if parsed_url.username or parsed_url.password or "@" in parsed_url.netloc:
-                raise LiveExecutorError("origin URL must not contain credential userinfo")
-            url_match = _GITHUB_HTTPS.fullmatch(origin_url)
-            if url_match is None:
-                raise LiveExecutorError("origin must be a credential-free HTTPS github.com repository URL")
-            if url_match.group("owner") not in _ALLOWED_OWNERS:
-                raise LiveExecutorError("origin owner is outside the approved owner set")
-            if url_match.group("repository") in {".", ".."}:
-                raise LiveExecutorError("origin repository name is unsafe")
+            # material and re-confirm the approved HTTPS owner/repository.
+            _validate_origin_url_argument(argv[9])
+        elif invocation.operation is LiveOperation.GIT_CLONE:
+            argv = invocation.argv
+            if (
+                len(argv) != 7
+                or argv[0:5] != ("git", "clone", "--origin", "origin", "--no-tags")
+            ):
+                raise LiveExecutorError("git clone argv does not match the exact constructed shape")
+            # Clone runs from the neutral filesystem root (parent==self), so no
+            # ancestor repository config can be discovered. A forged cwd would
+            # let git resolve a repo-level config under the attacker's control.
+            if invocation.cwd != NEUTRAL_GIT_CWD:
+                raise LiveExecutorError("git clone must run from the neutral root cwd")
+            _validate_origin_url_argument(argv[5])
+            _validate_checkout_path_argument(argv[6])
+        elif invocation.operation is LiveOperation.GIT_PUSH:
+            # _assert_exact_push_shape already pinned len==8 plus argv[0:3] and
+            # argv[4:]; re-validate the dynamic `-C <destination>` slot and its
+            # agreement with the working directory, so a forged push cannot run
+            # inside an attacker-controlled repository whose `origin` remote
+            # points at an attacker URL (credential exfiltration).
+            if invocation.cwd is None:
+                raise LiveExecutorError("git push requires a checkout cwd")
+            if invocation.argv[3] != str(invocation.cwd):
+                raise LiveExecutorError("git push -C destination does not match the invocation cwd")
+            _validate_checkout_path_argument(invocation.argv[3])
     if invocation.argv[0] == "bd" and set(invocation.env) & _BEADS_ENV_KEYS:
         raise LiveExecutorError("Beads Dolt overrides must be absent from bd operations")
 

@@ -1274,6 +1274,79 @@ class ControlledLiveExecutorTests(unittest.TestCase):
             with self.subTest(argv=argv), self.assertRaises(LiveExecutorError):
                 _validate_built_invocation(invocation)
 
+    def test_forged_clone_and_push_dynamic_slots_are_rejected(self) -> None:
+        """GIT_CLONE argv (origin URL, destination, cwd) and GIT_PUSH's dynamic
+        `-C`/cwd slots must be re-validated at the validator boundary, not merely
+        shape-pinned (successor-review finding)."""
+        from scripts.live_executor import (
+            _TransportInvocation,
+            _build_invocation,
+            _validate_built_invocation,
+            GitCloneRequest,
+            GitPushRequest,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        home = self.home
+        good_clone = _build_invocation(
+            LiveOperation.GIT_CLONE,
+            GitCloneRequest("https://github.com/pjbeyer/demo.git", dest),
+            home,
+        )
+        good_push = _build_invocation(LiveOperation.GIT_PUSH, GitPushRequest(dest), home)
+
+        def forged(op, argv, cwd, env):
+            return _TransportInvocation(
+                operation=op, argv=argv, cwd=cwd, env=env,
+                timeout_seconds=10, shell=False,
+            )
+
+        bad_clones = (
+            ("evil host", ("git", "clone", "--origin", "origin", "--no-tags",
+                           "https://github.com.evil.com/x/y.git", str(dest)),
+             good_clone.cwd),
+            ("ssh scheme", ("git", "clone", "--origin", "origin", "--no-tags",
+                            "git@github.com:pjbeyer/demo.git", str(dest)),
+             good_clone.cwd),
+            ("attacker destination", ("git", "clone", "--origin", "origin", "--no-tags",
+                                      "https://github.com/pjbeyer/demo.git", "/tmp/attacker-repo"),
+             good_clone.cwd),
+            ("forged cwd", ("git", "clone", "--origin", "origin", "--no-tags",
+                            "https://github.com/pjbeyer/demo.git", str(dest)),
+             Path("/tmp")),
+        )
+        for label, argv, cwd in bad_clones:
+            with self.subTest(label=label), self.assertRaises(LiveExecutorError):
+                _validate_built_invocation(
+                    forged(LiveOperation.GIT_CLONE, argv, cwd, good_clone.env)
+                )
+
+        # GIT_PUSH: dynamic -C slot and cwd both falsified to an attacker repo.
+        with self.assertRaises(LiveExecutorError):
+            _validate_built_invocation(
+                forged(
+                    LiveOperation.GIT_PUSH,
+                    ("git", "--no-optional-locks", "-C", "/tmp/attacker-repo",
+                     "push", "--set-upstream", "origin", "main"),
+                    Path("/tmp/attacker-repo"),
+                    good_push.env,
+                )
+            )
+        # GIT_PUSH: -C destination disagrees with cwd.
+        with self.assertRaises(LiveExecutorError):
+            _validate_built_invocation(
+                forged(
+                    LiveOperation.GIT_PUSH,
+                    ("git", "--no-optional-locks", "-C", str(dest),
+                     "push", "--set-upstream", "origin", "main"),
+                    Path("/tmp/attacker-repo"),
+                    good_push.env,
+                )
+            )
+        # Legit builder outputs must still pass their own re-validation.
+        _validate_built_invocation(good_clone)
+        _validate_built_invocation(good_push)
+
     def test_validator_rejects_unallowlisted_program_and_secret_env(self) -> None:
         """argv[0] outside the provisioner allowlist, and secret-shaped env values,
         are rejected at re-validation (review finding)."""
