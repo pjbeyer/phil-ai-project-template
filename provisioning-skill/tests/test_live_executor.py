@@ -97,12 +97,91 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         self.assertEqual(env.get("GIT_CONFIG_GLOBAL"), "/dev/null")
         self.assertEqual(env.get("GIT_CONFIG_NOSYSTEM"), "1")
 
-    def test_credential_chain_environment_rejects_secret_shaped_home(self) -> None:
+    def test_credential_chain_environment_resolves_home_from_passwd_not_environ(self) -> None:
         from scripts.live_executor import _credential_chain_environment
 
-        with patch.dict("os.environ", {"HOME": "ghp_abcdefghijklmnopqrstuvwxyz012345"}):
-            with self.assertRaisesRegex(LiveExecutorError, "secret-shaped"):
-                _credential_chain_environment()
+        import pwd
+
+        real_home = pwd.getpwuid(os.getuid()).pw_dir
+        with patch.dict("os.environ", {"HOME": "/tmp/attacker-chosen-home"}, clear=False):
+            env = dict(_credential_chain_environment())
+        # The regime ignores the taintable os.environ HOME and reads the
+        # authoritative passwd record for the invoking uid.
+        self.assertEqual(env["HOME"], real_home)
+        self.assertNotEqual(env["HOME"], "/tmp/attacker-chosen-home")
+        # The credential-chain key set is closed: no config/discovery/askpass
+        # override can ride along to inject a credential.helper.
+        self.assertEqual(set(env), live_executor._CREDENTIAL_CHAIN_ENV_KEYS)
+        for disallowed in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_ASKPASS", "XDG_CONFIG_HOME"):
+            self.assertNotIn(disallowed, env)
+
+    def test_credential_chain_invocation_rejects_injected_config_key(self) -> None:
+        from scripts.live_executor import (
+            _TransportInvocation,
+            _build_invocation,
+            _validate_built_invocation,
+            GitPushRequest,
+        )
+
+        invocation = _build_invocation(
+            LiveOperation.GIT_PUSH,
+            GitPushRequest(Path("/tmp/synthetic-home/Projects/pjbeyer/demo")),
+            self.home,
+        )
+        # Forge the env with an ambient credential-helper injection channel.
+        forged_env = dict(invocation.env)
+        forged_env["GIT_CONFIG_GLOBAL"] = "/tmp/attacker-config"
+        forged = _TransportInvocation(
+            operation=LiveOperation.GIT_PUSH,
+            argv=invocation.argv,
+            cwd=invocation.cwd,
+            env=forged_env,
+            timeout_seconds=invocation.timeout_seconds,
+            shell=False,
+        )
+        with self.assertRaisesRegex(LiveExecutorError, "closed key set"):
+            _validate_built_invocation(forged)
+
+    def test_authenticated_probe_argv_is_exact_shape_pinned(self) -> None:
+        from scripts.live_executor import (
+            _TransportInvocation,
+            _build_invocation,
+            _validate_built_invocation,
+        )
+
+        invocation = _build_invocation(
+            LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+            GitOriginVisibilityRequest("https://github.com/pjbeyer/demo.git"),
+            self.home,
+        )
+        # A forged authenticated probe that smuggles the anonymous probe's
+        # helper-disable must not pass even if labeled authenticated.
+        forged = _TransportInvocation(
+            operation=LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
+            argv=(
+                "git",
+                "-c",
+                "credential.helper=",
+                "-c",
+                "http.extraHeader=",
+                "-c",
+                "http.followRedirects=false",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.https.allow=always",
+                "ls-remote",
+                "--symref",
+                "https://github.com/pjbeyer/demo.git",
+                "HEAD",
+            ),
+            cwd=invocation.cwd,
+            env=invocation.env,
+            timeout_seconds=invocation.timeout_seconds,
+            shell=False,
+        )
+        with self.assertRaisesRegex(LiveExecutorError, "exact constructed shape"):
+            _validate_built_invocation(forged)
 
     def test_origin_anonymous_probe_builds_exact_read_only_argv(self) -> None:
         result = self.executor.execute(
@@ -728,7 +807,9 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 "/tmp/synthetic-home/Projects/pjbeyer/demo",
             ),
         )
-        self.assertIsNone(cwd)
+        # Clone runs from the neutral root cwd (parent == self) so the child
+        # can never inherit the Hermes process cwd for repository discovery.
+        self.assertEqual(cwd, live_executor.NEUTRAL_GIT_CWD)
 
     def test_git_clone_rejects_unsafe_origin_and_destination(self) -> None:
         from scripts.live_executor import GitCloneRequest

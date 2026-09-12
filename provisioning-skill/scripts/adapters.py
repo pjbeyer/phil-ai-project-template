@@ -2637,9 +2637,9 @@ class LiveAdapter:
         Fail-closed at the Git push boundary: ``open-source`` admits the run only
         after the published surface scans clean; every other visibility must have
         the origin proven ``private`` through the authenticated transport before
-        any push. The origin-visibility probe is a transport capability that has
-        not yet been admitted to the hardened executor allowlist, so the
-        non-open-source branch stops the run rather than assume private.
+        any push. The origin-visibility probe pair is admitted to the hardened
+        executor (credential-chain regime since T080); the non-open-source branch
+        still stops rather than assume private.
         """
         request, _, destination, _ = self._context()
 
@@ -2670,10 +2670,10 @@ class LiveAdapter:
         require_publish_hygiene(result)
 
         # FR-007 (FR-031): resolve origin GitHub visibility through the two
-        # probes and enforce the G11 pre-push gate. The anonymous probe is
-        # wired; the authenticated probe requires the credential-chain transport
-        # regime, which is not yet admitted, so it fails closed below rather
-        # than run anonymous and misclassify a private origin as unreachable.
+        # probes and enforce the G11 pre-push gate. Both probes are admitted;
+        # the authenticated probe runs on the credential-chain regime (T080) so
+        # a private origin is classified honestly rather than misread as
+        # unreachable.
         executor = self._production_executor()
         anonymous = executor.execute(
             LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE,

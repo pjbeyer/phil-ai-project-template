@@ -15,6 +15,7 @@ Two seams live here:
 from __future__ import annotations
 
 import os
+import pwd
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -369,7 +370,8 @@ class GitPushRequest:
     """Push the committed ``main`` to the exact approved ``origin`` upstream.
 
     Authentication is delegated to the operator's credential helper via the
-    fixed minimal environment; no credential value enters argv/env. ``--force``
+    credential-chain environment regime (T080); no credential value enters
+    argv/env. ``--force``
     is structurally unreachable (never in the module-built argv).
     """
 
@@ -555,30 +557,68 @@ _CREDENTIAL_CHAIN_OPERATIONS = frozenset(
     }
 )
 
+# The credential-chain regime must not accept caller-supplied env keys at all:
+# unlike the detached regime (which tolerates the wider MINIMAL_ENVIRONMENT_KEYS
+# because every value is re-derived from _FIXED_ENVIRONMENT), the credential
+# regime resolves discovery from the real account HOME, so any ambient override
+# of the config/discovery/askpass keys is a credential-helper injection channel.
+_CREDENTIAL_CHAIN_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "HOME",
+        "GIT_TERMINAL_PROMPT",
+        "GIT_OPTIONAL_LOCKS",
+    }
+)
+
+
+def _credential_chain_home() -> str:
+    """Return the operator's account home from the passwd database.
+
+    Deliberately NOT ``os.environ["HOME"]`` or ``Path.home()`` (which falls back
+    to os.environ): both are taintable by anything that can set env on the
+    Hermes process, and an attacker-chosen HOME places a ``credential.helper``
+    definition (and ``~/.gitconfig`` discovery) under their control. The passwd
+    database is authoritative for the invoking uid and is not env-influenced.
+    """
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError as error:
+        raise LiveExecutorError("could not resolve account home from passwd database") from error
+    if not home or home in {"/", "/nonexistent", "/usr/sbin"}:
+        raise LiveExecutorError("resolved account home is not a usable directory")
+    return home
+
 
 def _credential_chain_environment() -> Mapping[str, str]:
     """Build the credential-chain regime for the authenticated git operations.
 
     Distinct from ``_FIXED_ENVIRONMENT``: it preserves the operator's real
-    ``HOME`` and omits every credential-suppression guard present in the fixed
-    env (no ``GIT_ASKPASS=/usr/bin/false``, no ``GIT_CONFIG_GLOBAL=/dev/null``,
-    no ``GIT_CONFIG_NOSYSTEM=1``), so git resolves the operator's configured
+    account ``HOME`` (from the passwd database, not os.environ) and omits every
+    credential-suppression guard present in the fixed env (no
+    ``GIT_ASKPASS=/usr/bin/false``, no ``GIT_CONFIG_GLOBAL=/dev/null``, no
+    ``GIT_CONFIG_NOSYSTEM=1``), so git resolves the operator's configured
     ``credential.helper`` chain. It is still built exclusively from the
-    minimal-env allowlist, still carries no credential value (a home path is not
-    secret-shaped), and the shared validator re-checks every value before spawn.
+    credential-chain key set, still carries no credential value (a home path is
+    not secret-shaped), and the shared validator re-checks every value before
+    spawn and pins the exact key set per operation.
     """
-    home = os.environ.get("HOME") or str(Path.home())
+    home = _credential_chain_home()
     environment = {
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "LANG": "C",
         "LC_ALL": "C",
         "HOME": home,
         # Anti-prompt guards only — these do NOT block the credential.helper
-        # chain (that is what GIT_ASKPASS/=/usr/bin/false and GIT_CONFIG_GLOBAL=
+        # chain (that is what GIT_ASKPASS=/usr/bin/false and GIT_CONFIG_GLOBAL=
         # /dev/null were suppressing, and both are deliberately absent here).
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_OPTIONAL_LOCKS": "0",
     }
+    if set(environment) != _CREDENTIAL_CHAIN_ENV_KEYS:
+        raise LiveExecutorError("credential-chain environment key set is not closed")
     for key, value in environment.items():
         if (
             not isinstance(value, str)
@@ -739,7 +779,14 @@ def _git_clone_argv(request: GitCloneRequest) -> tuple[tuple[str, ...], Path | N
     adapter asserts absence before calling this). The clone is a full checkout
     of the empty origin's primary branch; ``--no-tags`` avoids pulling any
     mutable tag surface. Authentication is delegated to the operator's
-    credential helper via the fixed minimal environment (no credential value).
+    credential helper via the credential-chain environment regime (T080); no
+    credential value enters argv/env.
+
+    The clone runs from ``NEUTRAL_GIT_CWD`` (filesystem root) so the child
+    never inherits the Hermes process cwd: the destination is an absolute path
+    in argv, and ``parent == self`` at root leaves no ancestor in which Git
+    could discover a repository-level config. Credential-helper discovery is
+    driven by the preserved ``HOME`` env, not by the working directory.
     """
     if not isinstance(request.destination, Path) or not request.destination.is_absolute():
         raise LiveExecutorError("clone destination must be an absolute path")
@@ -768,7 +815,7 @@ def _git_clone_argv(request: GitCloneRequest) -> tuple[tuple[str, ...], Path | N
         "--no-tags",
         request.origin_url,
         path_text,
-    ), None
+    ), NEUTRAL_GIT_CWD
 
 
 def _git_remote_readback_argv(request: GitRemoteReadbackRequest) -> tuple[tuple[str, ...], Path]:
@@ -1276,6 +1323,47 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
             or "GIT_WORK_TREE" in invocation.env
         ):
             raise LiveExecutorError("remote Git preflight isolation is not fail closed")
+    elif invocation.operation in _CREDENTIAL_CHAIN_OPERATIONS:
+        # The credential-chain regime is held to a symmetric, closed standard:
+        # its exact key set admits no ambient override of config/discovery/
+        # askpass (GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM, GIT_ASKPASS,
+        # XDG_CONFIG_HOME), and no GIT_DIR/GIT_WORK_TREE may redirect discovery.
+        # A forged invocation must not smuggle a credential.helper injection
+        # channel into the regime that is supposed to resolve from real HOME
+        # discovery only.
+        if set(invocation.env) != _CREDENTIAL_CHAIN_ENV_KEYS:
+            raise LiveExecutorError("credential-chain environment is not the closed key set")
+        if "GIT_DIR" in invocation.env or "GIT_WORK_TREE" in invocation.env:
+            raise LiveExecutorError("credential-chain environment must not redirect discovery")
+        if "_CREDENTIAL_CHAIN_DISALLOWED" in invocation.env:  # pragma: no cover - defensive
+            raise LiveExecutorError("credential-chain environment carries a disallowed key")
+        # Pin the authenticated probe's exact read-only argv. Unlike the
+        # anonymous probe (15 tokens incl. the helper disables), the
+        # authenticated probe omits both `-c credential.helper=` and
+        # `-c http.extraHeader=`, so it is exactly 11 tokens with the same
+        # closed suffixes; argv[9] is the already-validated origin URL. The
+        # operation label is caller-suppliable, so pin the shape rather than
+        # trusting the label.
+        if invocation.operation is LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE:
+            argv = invocation.argv
+            if (
+                len(argv) != 11
+                or argv[0] != "git"
+                or argv[1:7]
+                != (
+                    "-c",
+                    "http.followRedirects=false",
+                    "-c",
+                    "protocol.allow=never",
+                    "-c",
+                    "protocol.https.allow=always",
+                )
+                or argv[7:9] != ("ls-remote", "--symref")
+                or argv[10] != "HEAD"
+            ):
+                raise LiveExecutorError(
+                    "authenticated origin-visibility argv does not match the exact constructed shape"
+                )
     if invocation.argv[0] == "bd" and set(invocation.env) & _BEADS_ENV_KEYS:
         raise LiveExecutorError("Beads Dolt overrides must be absent from bd operations")
 
