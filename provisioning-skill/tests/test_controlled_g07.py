@@ -693,7 +693,10 @@ class ControlledG07Tests(unittest.TestCase):
             and not literal.startswith("controlled ")
         }
         self.assertEqual(command_like_literals, set())
-        self.assertFalse(adapters._LIVE_EXECUTION_AVAILABLE)
+        # Live execution was approved 2026-09-13 and the coarse quarantine lifted;
+        # per-run mutation is still bound to sealed authorization, and the public
+        # CLI remains simulation-only (no --live selector below).
+        self.assertTrue(adapters._LIVE_EXECUTION_AVAILABLE)
         self.assertNotIn("_controlled_g07", inspect.getsource(adapters))
         public_source = inspect.getsource(provision_project)
         self.assertNotIn("_controlled_g07", public_source)

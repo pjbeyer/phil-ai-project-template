@@ -17,37 +17,16 @@ from scripts.provision_project import POST_PREFLIGHT, Provisioner, main
 
 
 class StateMachineTests(unittest.TestCase):
-    def test_live_adapter_is_explicitly_unavailable(self) -> None:
-        """The quarantine blocks before any runner/config/state access."""
-        class RunnerTripwire:
-            def __init__(self) -> None:
-                object.__setattr__(self, "calls", 0)
+    def test_unprepared_live_adapter_fails_closed_without_runner(self) -> None:
+        """The legacy quarantine runner seam is gone; the adapter no longer takes `runner=`.
 
-            def __getattribute__(self, name: str) -> object:
-                if name == "is_safe_command_runner":
-                    raise AssertionError("quarantined LiveAdapter consulted runner safety")
-                return object.__getattribute__(self, name)
-
-            def __setattr__(self, name: str, value: object) -> None:
-                del value
-                raise AssertionError(f"quarantined LiveAdapter mutated runner.{name}")
-
-            def run(self, spec: object) -> object:
-                del spec
-                object.__setattr__(self, "calls", self.calls + 1)
-                raise AssertionError("quarantined LiveAdapter reached its runner")
-
-        class ConfigTripwire:
-            def __getattribute__(self, name: str) -> object:
-                raise AssertionError(f"quarantined LiveAdapter consulted config.{name}")
-
-            def __setattr__(self, name: str, value: object) -> None:
-                del value
-                raise AssertionError(f"quarantined LiveAdapter mutated config.{name}")
-
-        runner = RunnerTripwire()
-        config = ConfigTripwire()
-        adapter = LiveAdapter(runner=runner, config=config)  # type: ignore[arg-type]
+        An unprepared adapter (no config) fails closed with a controlled
+        AdapterError on `prepare`/`_context`, and never mutates its own state.
+        The production path is `_production_executor()`; there is no injected
+        command runner.
+        """
+        adapter = LiveAdapter()
+        self.assertIsNone(adapter.config)
         initial_state = {
             "request": adapter.request,
             "origin": adapter.origin,
@@ -67,18 +46,8 @@ class StateMachineTests(unittest.TestCase):
             home = Path(temporary)
             origin, destination = normalize_request(request, home)
             fingerprint = request_fingerprint(request, destination)
-            with patch.object(
-                adapter,
-                "_validate_config",
-                side_effect=AssertionError("quarantined LiveAdapter validated config"),
-            ), patch.object(
-                adapter,
-                "_production_executor",
-                side_effect=AssertionError("quarantined LiveAdapter constructed an executor"),
-            ):
-                with self.assertRaisesRegex(AdapterError, "not yet approved or implemented"):
-                    adapter.prepare(request, origin, destination, fingerprint)
-        self.assertEqual(runner.calls, 0)
+            with self.assertRaisesRegex(AdapterError, "exact immutable configuration type"):
+                adapter.prepare(request, origin, destination, fingerprint)
         final_state = {
             "request": adapter.request,
             "origin": adapter.origin,

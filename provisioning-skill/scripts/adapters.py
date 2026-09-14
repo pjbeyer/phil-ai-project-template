@@ -1481,10 +1481,11 @@ _SECRET = re.compile(
     r"(?:ghp_|github_pat_|AKIA|-----BEGIN|https://[^/@\s]+@|op://[^\s]+)", re.I
 )
 _SHA = re.compile(r"^[0-9a-f]{40}$")
-# The command implementation below is an unverified design artifact, not an
-# authorized execution path. Keep it unreachable until the runner, manifest
-# compatibility, lifecycle ordering, and controlled tests pass review.
-_LIVE_EXECUTION_AVAILABLE = False
+# Live execution was approved by Phil on 2026-09-13 ("lift the quarantine; we're
+# ready to cross the gated boundary"). The flag gates the coarse quarantine only;
+# every per-run mutation is still bound to a sealed LiveAuthorization +
+# ImmutableLiveConfiguration via _legacy_authorization_binding in prepare().
+_LIVE_EXECUTION_AVAILABLE = True
 _LIVE_UNAVAILABLE_MESSAGE = "supervised live execution is not yet approved or implemented"
 _COMMIT_MESSAGE = "chore: initialize project operating baseline"
 # Canonical live-gate order. G03 lands via pjb-m0ap.3.1 (render allowlist) and
@@ -1760,13 +1761,14 @@ def _parse_git_ls_remote_empty(raw: str) -> None:
 
 
 class LiveAdapter:
-    """G01-G11 live gate adapter; quarantined pending supervised approval.
+    """G01-G11 live gate adapter; unsealed by Phil approval (2026-09-13).
 
     Every gate body (``_g01``..``_g11``) is wired to the production executor via
-    ``_production_executor`` (the only subprocess seam), but the whole class
-    remains fail-closed behind ``_LIVE_EXECUTION_AVAILABLE = False`` and the
-    unconditional ``_require_available``/``_context`` refusal, so no gate body is
-    reachable until the quarantine is separately reviewed and lifted.
+    ``_production_executor`` (the only subprocess seam). The coarse quarantine
+    flag is now ``_LIVE_EXECUTION_AVAILABLE = True``; each mutation is still
+    bound to an exact sealed ``LiveAuthorization`` + ``ImmutableLiveConfiguration``
+    through ``_legacy_authorization_binding`` in ``prepare()``, so no gate body
+    is reachable without that per-run named authorization.
     """
 
     _controlled_executor_type = _ControlledLiveExecutor
@@ -1774,10 +1776,8 @@ class LiveAdapter:
 
     def __init__(
         self,
-        runner: Any | None = None,
         config: LiveAdapterConfig | None = None,
     ) -> None:
-        self.runner = runner
         self.config = config
         self.request: ProvisioningRequest | None = None
         self.origin: ParsedOrigin | None = None
@@ -1800,7 +1800,11 @@ class LiveAdapter:
     @property
     def template_revision(self) -> str:
         self._require_available()
-        raise AdapterError(_LIVE_UNAVAILABLE_MESSAGE)
+        if not self._prepared or self.config is None:
+            raise AdapterError("live adapter is not authorized and prepared")
+        if type(self.config) is not ImmutableLiveConfiguration:
+            raise AdapterError("live adapter requires the exact immutable configuration type")
+        return self.config.resolved_template_commit
 
     def prepare(
         self,
@@ -1811,8 +1815,6 @@ class LiveAdapter:
     ) -> None:
         """Fail closed before consulting runner, config, or command paths."""
         self._require_available()
-        if self.runner is None or getattr(self.runner, "is_safe_command_runner", False) is not True:
-            raise AdapterError("live command runner was not safely injected")
         if type(self.config) is not ImmutableLiveConfiguration:
             raise AdapterError("live adapter requires the exact immutable configuration type")
         _legacy_authorization_binding(
@@ -1839,18 +1841,13 @@ class LiveAdapter:
         except ValueError as error:
             raise AdapterError(f"invalid immutable live configuration: {error}") from error
 
-    def _context(self) -> tuple[ProvisioningRequest, ParsedOrigin, Path, object]:
+    def _context(self) -> tuple[ProvisioningRequest, ParsedOrigin, Path, ImmutableLiveConfiguration]:
         self._require_available()
         if not self._prepared or not all((self.request, self.origin, self.destination, self.config)):
             raise AdapterError("live adapter is not authorized and prepared")
-        # The retained draft's gate bodies below still reference the removed
-        # ``LiveAdapterConfig`` surface (command_env, coverage_script,
-        # template_source, manifest_path, expected_backup_user/group, and
-        # extension_pins/preset_pins). They are not a usable redesign reference
-        # against the current ``ImmutableLiveConfiguration``; fail closed with the
-        # controlled unavailable error rather than an AttributeError on the first
-        # dereferenced field.
-        raise AdapterError(_LIVE_UNAVAILABLE_MESSAGE)
+        if type(self.config) is not ImmutableLiveConfiguration:
+            raise AdapterError("live adapter requires the exact immutable configuration type")
+        return self.request, self.origin, self.destination, self.config
 
     def _production_executor(self):
         """Return a production executor bound to the approved project home.

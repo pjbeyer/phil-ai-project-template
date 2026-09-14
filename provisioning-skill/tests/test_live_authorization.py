@@ -269,8 +269,11 @@ class ImmutableConfigurationTests(unittest.TestCase):
     def test_approved_home_resolution_prefers_env_then_config_file(self) -> None:
         from scripts.models import _approved_project_home
 
-        with patch.dict("os.environ", {}, clear=True):
-            # Neither source configured -> fail closed.
+        with patch.dict("os.environ", {}, clear=True), patch.object(
+            Path, "home", return_value=Path(_SYNTHETIC_HOME)
+        ):
+            # No env var and no synthetic config file -> fail closed (the test
+            # must not observe the operator's real ~/.config/provisioning file).
             with self.assertRaises(ConfigurationError):
                 _approved_project_home()
 
@@ -310,7 +313,10 @@ class ImmutableConfigurationTests(unittest.TestCase):
     def test_approved_template_source_resolution_prefers_env_then_config(self) -> None:
         from scripts.models import _approved_template_source
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True), patch.object(
+            Path, "home", return_value=Path(_SYNTHETIC_HOME)
+        ):
+            # No env var and no synthetic config file -> fail closed (hermetic).
             with self.assertRaises(ConfigurationError):
                 _approved_template_source()
 
@@ -1008,7 +1014,24 @@ class SafeLiveEvidenceTests(unittest.TestCase):
 
 
 class LegacyLiveAdapterQuarantineTests(unittest.TestCase):
-    def test_fail_closed_gate_precedes_config_authorization_and_executor_access(self) -> None:
+    def test_live_availability_flag_is_lifted(self) -> None:
+        """The coarse quarantine flag is now True (Phil-approved 2026-09-13).
+
+        Individual mutations remain bound to a sealed LiveAuthorization +
+        ImmutableLiveConfiguration; this test pins only the flag state.
+        """
+        import scripts.adapters as adapters_module
+
+        self.assertTrue(adapters_module._LIVE_EXECUTION_AVAILABLE)
+
+    def test_gate_precedes_config_authorization_and_executor_access(self) -> None:
+        """An unprepared/gate-unauthorized adapter still fails closed in order.
+
+        With the flag lifted, `prepare()` now requires a real
+        ImmutableLiveConfiguration and a sealed authorization; a forged request
+        carrying a non-LiveAuthorization object still fails closed before any
+        executor construction or config validation.
+        """
         class Tripwire:
             def __getattribute__(self, name: str) -> object:
                 raise AssertionError(f"legacy live adapter accessed {name}")
@@ -1019,7 +1042,7 @@ class LegacyLiveAdapterQuarantineTests(unittest.TestCase):
             "generic",
             live_authorization=Tripwire(),  # type: ignore[arg-type]
         )
-        adapter = LiveAdapter(runner=Tripwire(), config=Tripwire())  # type: ignore[arg-type]
+        adapter = LiveAdapter(config=Tripwire())  # type: ignore[arg-type]
         origin = SimpleNamespace(identity="pjbeyer/demo")
         destination = Path("/Users/synthetic-home/Projects/pjbeyer/demo")
         with patch("scripts.adapters.assert_live_authorized", side_effect=AssertionError("authorization accessed")), patch.object(
@@ -1027,52 +1050,30 @@ class LegacyLiveAdapterQuarantineTests(unittest.TestCase):
             "_controlled_executor_type",
             side_effect=AssertionError("executor constructed"),
         ), patch.object(adapter, "_validate_config", side_effect=AssertionError("config validated")):
-            with self.assertRaisesRegex(AdapterError, "not yet approved or implemented"):
-                _ = adapter.template_revision
-            with self.assertRaisesRegex(AdapterError, "not yet approved or implemented"):
+            # prepare() must reject the non-exact config BEFORE consulting the
+            # authorization binder, the executor type, or config validation.
+            with self.assertRaisesRegex(AdapterError, "exact immutable configuration type"):
                 adapter.prepare(request, origin, destination, "a" * 64)  # type: ignore[arg-type]
-            unavailable_calls = (
-                lambda: adapter.run_gate(Gate.PREFLIGHT),
-                lambda: adapter.gate_evidence(Gate.PREFLIGHT),
-                adapter.read_metadata,
-                lambda: adapter.append_manifest({}),
-                lambda: adapter.create_issue("scope-readme", "synthetic"),
-                adapter.verify_existing,
-                adapter.push_git,
-                adapter.push_dolt,
-            )
-            for call in unavailable_calls:
-                with self.subTest(call=call), self.assertRaisesRegex(
-                    AdapterError, "not yet approved or implemented"
-                ):
-                    call()
+            # template_revision on an unprepared adapter still fails closed.
+            with self.assertRaises(AdapterError):
+                _ = adapter.template_revision
 
-    def test_context_and_gate_bodies_fail_closed_not_attributerror(self) -> None:
-        """Even with quarantine flipped, the stale draft must not surface
-        AttributeError from its removed-config references (review T059 BLOCKER).
+    def test_context_returns_real_tuple_only_when_prepared(self) -> None:
+        """With the flag lifted, _context returns the real 4-tuple when prepared.
 
-        The retained gate bodies (``_g03``..``_g08``, ``_env``, ``_execute``,
-        backup helpers) still dereference fields of the removed
-        ``LiveAdapterConfig`` (command_env, coverage_script, template_source,
-        manifest_path, expected_backup_user/group, extension_pins/preset_pins).
-        ``_context`` — the choke point every one of them passes through — must
-        convert that into a controlled AdapterError, never an AttributeError.
+        Also confirms an unprepared adapter fails closed with a controlled
+        AdapterError (not AttributeError) and that a stale/non-exact config is
+        rejected at the choke point.
         """
         import scripts.adapters as adapters_module
 
         original = adapters_module._LIVE_EXECUTION_AVAILABLE
         try:
             adapters_module._LIVE_EXECUTION_AVAILABLE = True
-            # A bare, unprepared adapter: _context must raise the controlled
-            # unavailable error (not AttributeError) before touching any config
-            # field, regardless of the flag.
             adapter = LiveAdapter()
+            # Bare, unprepared adapter: fail closed before touching any field.
             with self.assertRaises(AdapterError):
                 adapter._context()
-            # Prepared with a fully-valid immutable config: the stale gate body
-            # references are still unreachable — _context hard-raises the
-            # controlled unavailable error instead of returning a config whose
-            # fields no longer exist.
             config = ImmutableLiveConfiguration.create(
                 repository_identity="pjbeyer/demo",
                 template_source_identity="pjbeyer/phil-ai-project-template",
@@ -1090,8 +1091,12 @@ class LegacyLiveAdapterQuarantineTests(unittest.TestCase):
             adapter.origin = SimpleNamespace(identity="pjbeyer/demo")
             adapter.destination = Path("/Users/synthetic-home/Projects/pjbeyer/demo")
             adapter._prepared = True
-            with self.assertRaisesRegex(AdapterError, "not yet approved or implemented"):
-                adapter._context()
+            # Prepared with a valid immutable config: _context returns the tuple.
+            request, origin, destination, returned_config = adapter._context()
+            self.assertEqual(request, adapter.request)
+            self.assertEqual(origin, adapter.origin)
+            self.assertEqual(destination, adapter.destination)
+            self.assertIs(returned_config, config)
         finally:
             adapters_module._LIVE_EXECUTION_AVAILABLE = original
 

@@ -1,21 +1,41 @@
 ---
 name: project-provisioning
-description: "Use when Phil asks to create, provision, or bootstrap a new GitHub project repository from an empty origin. Defines the approved provisioning contract and runs deterministic simulations only; the retained LiveAdapter draft is fail-closed and no live provisioning path is implemented."
-version: 0.2.2
+description: "Use when Phil asks to create, provision, or bootstrap a new GitHub project repository from an empty origin. Defines the approved provisioning contract. The public CLI remains simulation-only; the supervised live path (G01–G11 gate bodies + production executor) is implemented and unsealed behind per-run sealed authorization, not exposed as a public selector."
+version: 0.2.3
 platforms: [macos]
 ---
 
 # Project provisioning
 
-## Current availability: simulation only
+## Current availability: simulation CLI + supervised live path
 
-The only available behavior is deterministic `FakeAdapter` simulation. The public CLI has no live selector, never constructs `LiveAdapter`, always identifies its result as simulation, and exits nonzero. It does not provision or inspect a live repository.
+The public CLI remains deterministic `FakeAdapter` simulation only: it has no
+live selector, never constructs `LiveAdapter`, always identifies its result as
+simulation, and exits nonzero.
+
+The supervised live path is implemented and unsealed (Phil-approved
+2026-09-13). `_LIVE_EXECUTION_AVAILABLE` is `True`; the G01–G11 gate bodies
+run through `_production_executor()` (the credential-chain production
+transport). Every live run is still bound to a sealed `LiveAuthorization` +
+`ImmutableLiveConfiguration` via `assert_live_authorized`, and there is no
+public `--live` flag — live invocation is a supervised, library-level path.
+
+Operator-local runtime config is required and fail-closed if absent:
+`~/.config/provisioning/config.json` (or the `PROVISIONING_APPROVED_HOME` /
+`PROVISIONING_TEMPLATE_SOURCE` env vars) must set `approved_project_home` and
+`approved_template_source`.
 
 An internal Task-5 control plane now models inspect-only G02–G11 normalization and exact-gate resume using closed, typed operations and controlled disposable fakes. It accepts bounded raw JSON observations, derives parser-owned sanitized findings, and cryptographically binds every safely admitted full observation—including the current failed observation—using non-disclosing canonical payload digests. Unsafe, unavailable, or malformed observations fail closed and cannot authorize resume. It returns `verified-existing` only when every terminal invariant (including both Git and Dolt synchronization) passes, and otherwise identifies the first exact unproven gate. Inspection evidence is immutable and in-memory only. Resume binds that evidence ID plus request/config fingerprints and the next gate, repeats the same ordered inspection, requires the fresh full evidence snapshot and evidence ID to match exactly, and starts only that gate. This control plane is deliberately factory-gated for controlled tests and is not wired to `LiveAdapter` or the public CLI; it adds no live availability.
 
 A separate private controlled-fixture boundary models G06 manifest append, G07 backup state, and the offline G08-C synthetic SpecKit handoff only for descriptor-pinned disposable temporary fixtures. The G08-C controller is factory-gated and single-use; it creates only the fixed synthetic `.specify` tree and fixture-local `G08-C`/`simulation` ledger, and revalidates the persisted G07 oracle before every mutation. Its closed two-module implementation permits only descriptor-relative fixture operations plus the fixed temporary-root bootstrap; it has no public-CLI or `LiveAdapter` wiring and invokes no real SpecKit, command, network, service, credential, Git, Beads, Dolt, Copier, manifest, backup, or origin operation. A ledger outcome is durable only after post-replace evidence-directory fsync plus exact stable-ledger readback; otherwise it returns unrecorded/indeterminate partial. Cooperative descriptor pinning constrains the test fixture; it is not a sandbox against hostile Python in the same process. G08-C approval remains a prerequisite for any future live-G08 work, and does not itself authorize it.
 
-A rejected, incomplete `LiveAdapter` draft remains in source only as quarantined redesign reference. `_LIVE_EXECUTION_AVAILABLE = False` blocks it before runner/config validation, command construction, or runner invocation. It has no approved executor, credential path, or production transport and must not be represented as live-ready. Replacing it requires a closed operation-specific executor (no arbitrary argv), bounded raw outputs parsed by the adapter, minimal command environments and command-scoped credential providers, configuration-digest-bound authorization, mandatory sanitized evidence, inspect-only state discovery, exact gate-bound resume, controlled tests, independent review, and a separate approval. Until then, only simulation commands below are permitted.
+The G01–G11 live gate bodies are implemented and unsealed (Phil-approved
+2026-09-13). `_LIVE_EXECUTION_AVAILABLE` is `True`; the gate bodies run through
+`_production_executor()` (the credential-chain production transport), each
+performing mandatory post-mutation readbacks. Every live mutation remains bound
+to an exact sealed `LiveAuthorization` + `ImmutableLiveConfiguration` via
+`assert_live_authorized` (identity, request fingerprint, config digest, and
+starting gate), so the coarse flag alone cannot authorize a run.
 
 Provisioning prerequisites describe a future supervised live workflow; supplying them does not enable live execution:
 
@@ -106,9 +126,9 @@ Run a hygiene scan over changed source and generated render roots. Do not treat 
 ## Recorded T048 inputs (input-recording gate only — not authorization)
 
 The following were supplied by Phil on 2026-09-13 for the T048 input-recording
-gate. Recording them here does **not** authorize a live run; T049 remains
-blocked on `_LIVE_EXECUTION_AVAILABLE = False` and an approved production
-executor, neither of which exists in this skill.
+gate. The live path is now implemented and unsealed; recording these inputs is
+not itself the authorization — a live T049 run still requires a sealed
+`LiveAuthorization` + `ImmutableLiveConfiguration` bound to the exact request.
 
 - `origin_url`: `https://github.com/pjbeyer/tmp-proj-1` (verified empty via
   anonymous `git ls-remote` — exit 0, no refs)
@@ -121,18 +141,14 @@ executor, neither of which exists in this skill.
 
 **Graduating:** live provisioning begins review-every-run. It may move to sampled review only after multiple documented clean, reversible, no-duplicate runs and a demonstrated recovery path. Any unsafe run reverts to review-every-run.
 
-The provisioner is currently **simulation-only**. A rejected, incomplete
-`LiveAdapter` draft is retained solely as a quarantined redesign reference;
-`_LIVE_EXECUTION_AVAILABLE = False` blocks it before runner/config validation,
-command construction, or runner invocation. It has no approved executor,
-credential path, production transport, or live inspection path and cannot
-satisfy live provisioning requirements or SC-003. `simulation-passed` is test
-evidence only—not a provisioned repository, Git/Dolt synchronization, or
-verification claim. Simulation marks G02–G11 evidence as `simulated`, leaves
-`mutations_completed` empty, and exits non-zero so automation cannot mistake
-an offline adapter exercise for success. Approval of redesign documents or
-controlled tests does not authorize a live run; a production executor and any
-real invocation require separate review and approval.
+The supervised live path is implemented and unsealed (Phil-approved
+2026-09-13). `_LIVE_EXECUTION_AVAILABLE = True`; the G01–G11 gate bodies run
+through `_production_executor()` and perform mandatory post-mutation readbacks.
+The public CLI remains `FakeAdapter` simulation-only (no `--live` selector);
+live invocation is a supervised library-level path bound to a sealed
+`LiveAuthorization` + `ImmutableLiveConfiguration`. `simulation-passed` is test
+evidence only, never a provisioned-repository claim, and a real live run still
+requires explicit named authorization for this exact fingerprint and gate.
 
 The template is independently versioned. Current revision `v0.1.4`
 (resolved commit `82dc6eae0730f888bb66a00e061242fb5b7e59fd`), published at
