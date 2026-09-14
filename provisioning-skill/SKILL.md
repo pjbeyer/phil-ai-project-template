@@ -36,6 +36,19 @@ The template never creates `.beads/`, `.specify/`, backup state, Cron state, cre
 
 Use the template only from an approved immutable revision. Arbitrary template URLs are forbidden. Before a live render, capture the approved template tag and resolved commit in sanitized evidence.
 
+## Hermes profile integration
+
+When the target is a Hermes **profile distribution**, load the shared
+`hermes-profile-lifecycle` skill as well. This skill remains the canonical
+source for generic G01–G11 repository/origin controls; the lifecycle skill
+adds the profile-specific boundary, source-package smoke, private distribution,
+release-adoption, installation/activation handoff, and maintenance overlay.
+
+Do not use the template or a `simulation-passed` result to claim that a profile
+has been created, activated, or published. The public provisioner remains
+simulation-only, and every live origin/profile/credential/service action needs
+its own approval.
+
 ## Future live workflow contract (not implemented)
 
 The intended state machine is G01–G11:
@@ -89,6 +102,18 @@ python3 -m py_compile scripts/*.py tests/*.py
 ```
 
 Run a hygiene scan over changed source and generated render roots. Do not treat no test collection as success. Template render tests must cover all three kinds, expected/forbidden files, YAML/JSON validity, full-SHA action pins, absence of credentials/private paths, and no live-state artifacts.
+
+## Recorded T048 inputs (input-recording gate only — not authorization)
+
+The following were supplied by Phil on 2026-09-13 for the T048 input-recording
+gate. Recording them here does **not** authorize a live run; T049 remains
+blocked on `_LIVE_EXECUTION_AVAILABLE = False` and an approved production
+executor, neither of which exists in this skill.
+
+- `origin_url`: `https://github.com/pjbeyer/tmp-proj-1` (verified empty via
+  anonymous `git ls-remote` — exit 0, no refs)
+- `beads_prefix`: `tmp1`
+- `project_kind`: `macos-cli`
 
 ## Live run gate
 
