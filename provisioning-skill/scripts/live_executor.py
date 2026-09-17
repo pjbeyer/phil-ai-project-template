@@ -42,6 +42,8 @@ class LiveOperation(Enum):
     GIT_REMOTE_PREFLIGHT = "git-remote-preflight"
     LOCAL_GIT_READBACK = "local-git-readback"
     CENTRAL_DOLT_PROBE = "central-dolt-probe"
+    DOLT_DATABASE_READBACK = "dolt-database-readback"
+    DOLT_COMMIT = "dolt-commit"
     GIT_CLONE = "git-clone"
     GIT_REMOTE_READBACK = "git-remote-readback"
     GIT_TEMPLATE_REVISION = "git-template-revision"
@@ -207,6 +209,37 @@ class BeadsHooksListRequest:
 @dataclass(frozen=True, slots=True)
 class CentralDoltProbeRequest:
     """Parameter-free request for the fixed central-Dolt SELECT 1 probe."""
+
+
+@dataclass(frozen=True, slots=True)
+class DoltDatabaseReadbackRequest:
+    """Name one central-Dolt database whose exact Beads schema is read back.
+
+    The database value is validated as a safe generated identity before any
+    argv is built; it is never interpolated into a shell.  The readback lists
+    the database's tables on the fixed central server and requires the
+    provisioner to observe the authoritative schema there, independently of the
+    ``.beads/metadata.json`` the init wrote.
+    """
+
+    database: str
+
+
+@dataclass(frozen=True, slots=True)
+class DoltCommitRequest:
+    """Commit pending working-set changes on one central-Dolt database.
+
+    ``bd init`` seeds the ``config`` table (issue prefix, compaction knobs) but
+    leaves that write uncommitted, which the G07 coverage audit (a clean
+    working set is the established managed-repo convention) correctly flags.
+    ``bd dolt commit`` is a silent no-op in external-server mode, so this
+    operation drives the raw ``dolt commit -A`` against the fixed central
+    server with an explicit, fixed author. ``database`` is the safely generated
+    identity; ``message`` carries no shell/forbidden material.
+    """
+
+    database: str
+    message: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -506,7 +539,37 @@ _FLOATING_REFS = frozenset(
 )
 
 TIMEOUT_SECONDS = 15
+# Server-mutating Beads/Dolt operations talk to the shared central Dolt server
+# over the network and are measurably slow: `bd init --server --external`
+# takes ~2 minutes against 127.0.0.1:3307 (measured 2026-09-13), far beyond the
+# 15s default for local probes. These get a dedicated bounded budget so a live
+# run is not aborted by a fixed short cap; the value is still hard-bounded so a
+# hung operation cannot stall the run indefinitely.
+SERVER_MUTATION_TIMEOUT_SECONDS = 300
 MAX_OUTPUT_CHARS = 16_384
+# Operations that talk to the shared central Dolt server and are measured slow
+# (remote SQL, external-server Beads init/setup/backup, issue create/search,
+# and remote/Dolt sync). They use the longer server budget above; local-only
+# operations keep the short TIMEOUT_SECONDS. The authenticated BD_DOLT_PUSH is
+# credential-chain (its own branch) but is listed here too so the timeout is
+# consistent if routing ever changes.
+_SERVER_MUTATION_OPERATIONS = frozenset({
+    LiveOperation.BEADS_INIT,
+    LiveOperation.BEADS_SETUP,
+    LiveOperation.BEADS_SETUP_CHECK,
+    LiveOperation.BEADS_HOOKS_INSTALL,
+    LiveOperation.BEADS_HOOKS_LIST,
+    LiveOperation.BEADS_BACKUP_INIT,
+    LiveOperation.BEADS_BACKUP_SYNC,
+    LiveOperation.BEADS_BACKUP_STATUS,
+    LiveOperation.DOLT_REMOTE_LIST,
+    LiveOperation.DOLT_REMOTE_ADD,
+    LiveOperation.DOLT_COMMIT,
+    LiveOperation.BD_SEARCH_ISSUES,
+    LiveOperation.BD_CREATE_ISSUE,
+    LiveOperation.BD_SHOW_ISSUE,
+    LiveOperation.COVERAGE_AUDIT,
+})
 MINIMAL_ENVIRONMENT_KEYS = frozenset(
     {
         "PATH",
@@ -524,7 +587,7 @@ MINIMAL_ENVIRONMENT_KEYS = frozenset(
 # The coverage audit is the sole bounded env-surface expansion: it must read the
 # real Hermes home + XDG state base to resolve the shared manifest, Cron jobs, and
 # its own state readback. These are non-secret location values, never credentials.
-_AUDIT_ENV_KEYS = frozenset({"HERMES_HOME", "XDG_STATE_HOME"})
+_AUDIT_ENV_KEYS = frozenset({"HERMES_HOME", "XDG_STATE_HOME", "DOLT_ROOT_PATH"})
 _ALLOWED_CONTROLLED_ENV_KEYS = MINIMAL_ENVIRONMENT_KEYS | _BEADS_ENV_KEYS | _AUDIT_ENV_KEYS
 # Remote preflight starts at the filesystem root: it is absolute, always exists,
 # and ``parent == self`` leaves no ancestor in which Git could discover config.
@@ -554,6 +617,11 @@ _CREDENTIAL_CHAIN_OPERATIONS = frozenset(
         LiveOperation.GIT_ORIGIN_AUTHENTICATED_LS_REMOTE,
         LiveOperation.GIT_CLONE,
         LiveOperation.GIT_PUSH,
+        # Both authenticate to the private origin over HTTPS during the run:
+        # GIT_LS_REMOTE_MAIN reads origin/main back for the pre/post-push proof,
+        # and BD_DOLT_PUSH pushes the Dolt data ref to the `git+https` remote.
+        LiveOperation.GIT_LS_REMOTE_MAIN,
+        LiveOperation.BD_DOLT_PUSH,
     }
 )
 
@@ -572,12 +640,26 @@ _CREDENTIAL_CHAIN_ENV_KEYS = frozenset(
         "GIT_OPTIONAL_LOCKS",
     }
 )
+# Phil-approved token passthrough (2026-09-13): his credential helper
+# ``git-credential-gh-env`` reads account-scoped GitHub tokens from the process
+# environment only (never Keychain/1Password/gh). For the three credential-chain
+# git operations to authenticate, exactly these three account tokens are
+# permitted to cross the child environment boundary. This is a named, bounded
+# exception to the closed key set: the keys are fixed (no ambient overrides),
+# values must match the github_pat_ token shape, and they are only admitted on
+# credential-chain operations, never echoed in argv/stderr/stdout.
+_CREDENTIAL_CHAIN_TOKEN_KEYS = frozenset(
+    {
+        "GH_TOKEN_PJBEYER",
+        "GH_TOKEN_PJB_FLEX",
+        "GH_TOKEN_FLEXAPP",
+    }
+)
 # The credential-chain regime trusts PATH to resolve ``git`` (and, transitively,
 # ``git-remote-https`` / the credential helper), so PATH is pinned to an exact
 # value at the validation boundary — a forged PATH that shadows ``git`` with a
 # malicious binary must not survive re-validation.
 _CREDENTIAL_CHAIN_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-
 
 def _credential_chain_home() -> str:
     """Return the operator's account home from the passwd database.
@@ -622,20 +704,35 @@ def _credential_chain_environment() -> Mapping[str, str]:
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_OPTIONAL_LOCKS": "0",
     }
-    if set(environment) != _CREDENTIAL_CHAIN_ENV_KEYS:
+    # Phil-approved token passthrough (2026-09-13): inject exactly the three
+    # account-scoped GitHub tokens his env-based credential helper needs, read
+    # from the ambient process environment and admitted only when token-shaped.
+    # The values are never echoed (argv/stderr/stdout redaction covers them).
+    for key in _CREDENTIAL_CHAIN_TOKEN_KEYS:
+        value = os.environ.get(key)
+        if value is not None and _TOKEN_VALUE.fullmatch(value):
+            environment[key] = value
+    if set(environment) - (_CREDENTIAL_CHAIN_ENV_KEYS | _CREDENTIAL_CHAIN_TOKEN_KEYS):
         raise LiveExecutorError("credential-chain environment key set is not closed")
     for key, value in environment.items():
         if (
             not isinstance(value, str)
-            or _SECRET_SHAPED.search(value)
             or "\x00" in value
             or "\n" in value
             or "\r" in value
         ):
             raise LiveExecutorError(
+                f"credential-chain environment {key!r} contains invalid material"
+            )
+        # Token values are shape-validated on admission; every other value must
+        # be free of secret-shaped material (a token cannot smuggle in via a
+        # non-token key).
+        if key not in _CREDENTIAL_CHAIN_TOKEN_KEYS and _SECRET_SHAPED.search(value):
+            raise LiveExecutorError(
                 f"credential-chain environment {key!r} contains secret-shaped or invalid material"
             )
     return MappingProxyType(environment)
+
 
 
 def _minimal_environment(controlled: Mapping[str, str], *, program: str) -> Mapping[str, str]:
@@ -650,6 +747,45 @@ def _minimal_environment(controlled: Mapping[str, str], *, program: str) -> Mapp
     if program == "bd":
         for key in _BEADS_ENV_KEYS:
             environment.pop(key, None)
+    return MappingProxyType(environment)
+
+
+def _neutral_local_environment() -> Mapping[str, str]:
+    """Local mutation/readback environment for non-networking tools.
+
+    Local tools (``dolt``, ``copier``, ``specify``, ``bd``, and local git
+    readback) need a writable account HOME to create their own config dirs
+    (``~/.dolt``, ``~/.config``) and a PATH that includes the operator's local
+    bin (``specify`` lives outside the Homebrew prefix). It remains
+    credential-free: git's global/system config are isolated
+    (``GIT_CONFIG_GLOBAL=/dev/null``, ``GIT_CONFIG_NOSYSTEM=1``), so git cannot
+    discover the operator's ``credential.helper``, and the provisioning commit's
+    author identity is supplied inline via ``-c`` rather than read from
+    ``~/.gitconfig``. No credential value enters this environment; the shared
+    validator re-checks every key and value before spawn.
+    """
+    home = _credential_chain_home()
+    environment = {
+        "PATH": f"{_CREDENTIAL_CHAIN_PATH}:{home}/.local/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "HOME": home,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+    for key, value in environment.items():
+        if (
+            not isinstance(value, str)
+            or _SECRET_SHAPED.search(value)
+            or "\x00" in value
+            or "\n" in value
+            or "\r" in value
+        ):
+            raise LiveExecutorError(
+                f"neutral local environment {key!r} contains secret-shaped or invalid material"
+            )
     return MappingProxyType(environment)
 
 
@@ -951,7 +1087,11 @@ def _copier_render_argv(request: CopierRenderRequest) -> tuple[tuple[str, ...], 
         if type(key) is not str or type(value) is not str:
             raise LiveExecutorError("render answers must be plain strings")
         _reject_secret_or_unsafe_text(key, "render answer key")
-        _reject_secret_or_unsafe_text(value, "render answer value")
+        # An empty answer value is safe and legitimate (e.g. an omitted
+        # project_description); it carries no secret, shell, or forbidden-token
+        # form. Non-empty values are still fully validated by the shared guard.
+        if value:
+            _reject_secret_or_unsafe_text(value, "render answer value")
         if key in seen:
             raise LiveExecutorError("render answer keys must be unique")
         seen.add(key)
@@ -1095,6 +1235,7 @@ def _speckit_init_argv(request: SpeckitInitRequest) -> tuple[tuple[str, ...], Pa
         "specify",
         "init",
         "--here",
+        "--force",
         "--integration",
         "hermes",
         "--script",
@@ -1190,7 +1331,7 @@ def _git_status_all_argv(request: GitStatusAllRequest) -> tuple[tuple[str, ...],
     destination = _git_checkout_destination(request, request.destination)
     return (
         "git", "--no-optional-locks", "-C", str(destination),
-        "status", "--porcelain=v1", "--untracked-files=all",
+        "status", "--porcelain=v1", "--branch", "--untracked-files=all",
     ), destination
 
 
@@ -1220,6 +1361,8 @@ def _git_commit_argv(request: GitCommitRequest) -> tuple[tuple[str, ...], Path]:
     _reject_secret_or_unsafe_text(request.message, "commit message")
     return (
         "git", "--no-optional-locks", "-C", str(destination),
+        "-c", "user.name=Phil Beyer",
+        "-c", "user.email=6152278+pjbeyer@users.noreply.github.com",
         "commit", "-m", request.message,
     ), destination
 
@@ -1277,6 +1420,79 @@ def _dolt_argv(request: CentralDoltProbeRequest) -> tuple[tuple[str, ...], Path 
     ), None
 
 
+def _dolt_database_readback_argv(
+    request: DoltDatabaseReadbackRequest,
+) -> tuple[tuple[str, ...], Path | None]:
+    """List one central-dolt database's tables for independence verification.
+
+    The database identity is re-validated here (defense in depth) as a safe
+    generated name before it is placed into the fixed-quote-free argv.  The
+    query is a fixed ``SHOW TABLES`` on the safe identity; no caller-controlled
+    SQL reaches the server. Backticks and the trailing semicolon are omitted
+    because the identity is already constrained to ``[A-Za-z][A-Za-z0-9_]+``
+    (no quoting needed) and ``;`` is a shell metacharacter the validator
+    would flag.
+    """
+    database = request.database
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,127}", database) is None:
+        raise LiveExecutorError("dolt database readback received an unsafe identity")
+    return (
+        "dolt",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "3307",
+        "--no-tls",
+        "sql",
+        "-r",
+        "json",
+        "-q",
+        f"SHOW TABLES FROM {database}",
+    ), None
+
+
+# Fixed, module-constructed author for the raw-Dolt commit. `dolt commit --author`
+# requires the `Name <email>` format; the angle brackets are shell
+# metacharacters that the shared validator otherwise rejects, so this exact
+# literal is the ONLY value admitted for the DOLT_COMMIT author slot (exempted
+# in _validate_built_invocation). It mirrors the git provisioning commit
+# identity (live_executor._git_commit_argv) and carries no credential.
+_DOLT_COMMIT_AUTHOR = "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+
+
+def _dolt_commit_argv(
+    request: DoltCommitRequest,
+) -> tuple[tuple[str, ...], Path | None]:
+    """Commit pending working-set changes on one central-Dolt database.
+
+    ``database`` is re-validated as a safe generated identity; ``message`` is
+    checked for shell/forbidden/secret material. argv is fixed and exact:
+    ``dolt --host 127.0.0.1 --port 3307 --no-tls --use-db <db> commit -A
+    -m <message> --author <_DOLT_COMMIT_AUTHOR>``. ``commit -A`` stages and
+    commits the working set without touching service control or remote state.
+    """
+    database = request.database
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,127}", database) is None:
+        raise LiveExecutorError("dolt commit received an unsafe database identity")
+    _reject_secret_or_unsafe_text(request.message, "dolt commit message")
+    return (
+        "dolt",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "3307",
+        "--no-tls",
+        "--use-db",
+        database,
+        "commit",
+        "-A",
+        "-m",
+        request.message,
+        "--author",
+        _DOLT_COMMIT_AUTHOR,
+    ), None
+
+
 def _assert_exact_push_shape(invocation: _TransportInvocation) -> None:
     """Pin the two approved push argv to their exact module-constructed shapes.
 
@@ -1304,7 +1520,7 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
     """Defense in depth: reject shell, mutation, service control, and secrets."""
     if invocation.shell or not invocation.argv:
         raise LiveExecutorError("controlled invocations must be non-shell argv")
-    if not 0 < invocation.timeout_seconds <= 30:
+    if not 0 < invocation.timeout_seconds <= SERVER_MUTATION_TIMEOUT_SECONDS:
         raise LiveExecutorError("controlled invocation timeout is not bounded")
     # argv[0] must be a provisioner-allowed program. This closes the reviewer
     # finding that a hand-built invocation could run an arbitrary program.
@@ -1316,6 +1532,15 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
     # a shell program); it is never a shell invocation. Permit it only in that
     # exact, module-constructed form.
     speckit_script_value = (
+        invocation.operation is LiveOperation.SPECKIT_INIT and lowered[0] == "specify"
+    )
+    # The fixed SpecKit init argv also carries `--force`, which merges SpecKit's
+    # scaffold into the already-populated checkout (G03 Copier render + G04 Beads
+    # init precede G08). It is the documented canonical form for `specify init
+    # --here` into a non-empty directory and is admitted ONLY as the exact,
+    # standalone `--force` token on SPECKIT_INIT — never an attached `--force=…`
+    # or `-f…` form, which stay hard-blocked below.
+    speckit_force_value = (
         invocation.operation is LiveOperation.SPECKIT_INIT and lowered[0] == "specify"
     )
     # The narrow remote-write exception (approved 2026-09-11): the literal token
@@ -1335,6 +1560,7 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
     if any(
         argument in _FORBIDDEN_TOKENS
         and not (speckit_script_value and argument == "sh")
+        and not (speckit_force_value and argument == "--force")
         and not (push_value and argument == "push")
         for argument in lowered
     ):
@@ -1346,25 +1572,51 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
             raise LiveExecutorError("controlled invocation contains secret-shaped material")
         # Any dangerous flag prefix in an attached form (`--force=…`, `-f…`)
         # is rejected here even when the whole-word scan above misses it.
-        if argument.startswith(("--force", "-f")) or "\x00" in argument:
+        # The exact standalone `--force` token is admitted only on SPECKIT_INIT
+        # (see speckit_force_value); attached `--force=…`/`-f…` stay blocked.
+        if (
+            argument.startswith(("--force", "-f"))
+            and not (speckit_force_value and argument == "--force")
+        ) or "\x00" in argument:
             raise LiveExecutorError("controlled invocation contains a destructive or service-control form")
         # The sole semicolon is part of the exact, internal SELECT 1 literal;
         # all caller-controlled values are validated before argv construction.
+        # Likewise the DOLT_COMMIT author literal is fixed module state: `dolt
+        # commit --author` requires `Name <email>`, whose angle brackets are
+        # shell metacharacters, so ONLY this exact constant is exempted.
         if (
             any(character in argument for character in _SHELL_METACHARACTERS)
             and not (
                 invocation.operation is LiveOperation.CENTRAL_DOLT_PROBE
                 and argument == "SELECT 1 AS ok;"
             )
+            and not (
+                invocation.operation is LiveOperation.DOLT_COMMIT
+                and argument == _DOLT_COMMIT_AUTHOR
+            )
         ):
             raise LiveExecutorError("controlled invocation contains shell syntax")
-    if set(invocation.env) - _ALLOWED_CONTROLLED_ENV_KEYS:
+    token_keys_present = set(invocation.env) & _CREDENTIAL_CHAIN_TOKEN_KEYS
+    if token_keys_present and invocation.operation not in _CREDENTIAL_CHAIN_OPERATIONS:
+        # Account tokens may ride only the credential-chain regime; detached
+        # operations (preflight, anonymous visibility probe) stay credential-free.
+        raise LiveExecutorError("credential token keys are not admitted on a detached operation")
+    if set(invocation.env) - (
+        _ALLOWED_CONTROLLED_ENV_KEYS
+        | _CREDENTIAL_CHAIN_TOKEN_KEYS
+    ):
         raise LiveExecutorError("controlled invocation environment is outside the allowlist")
     # Re-check every env value for secret-shaped / control material so the
     # transport's re-validation is self-contained (not trusting upstream alone).
     for key, value in invocation.env.items():
         if not isinstance(value, str):
             raise LiveExecutorError("controlled invocation environment value is not a string")
+        if key in _CREDENTIAL_CHAIN_TOKEN_KEYS:
+            # Account tokens are admitted only in exact github_pat_ shape; never
+            # echoed (argv/stderr/stdout redaction already covers token-shaped text).
+            if not _TOKEN_VALUE.fullmatch(value):
+                raise LiveExecutorError("credential token value is not token-shaped")
+            continue
         if _SECRET_SHAPED.search(value) or "\x00" in value or "\n" in value or "\r" in value:
             raise LiveExecutorError("controlled invocation environment contains secret-shaped material")
     if invocation.operation in (
@@ -1395,7 +1647,8 @@ def _validate_built_invocation(invocation: _TransportInvocation) -> None:
         # A forged invocation must not smuggle a credential.helper injection
         # channel into the regime that is supposed to resolve from real HOME
         # discovery only.
-        if set(invocation.env) != _CREDENTIAL_CHAIN_ENV_KEYS:
+        admitted_keys = _CREDENTIAL_CHAIN_ENV_KEYS | _CREDENTIAL_CHAIN_TOKEN_KEYS
+        if set(invocation.env) - admitted_keys:
             raise LiveExecutorError("credential-chain environment is not the closed key set")
         # The key set is closed, but the VALUES of PATH and HOME are also
         # caller-falsifiable on a forged invocation: PATH must remain the exact
@@ -1512,6 +1765,7 @@ class ControlledLiveExecutor:
             LiveOperation.BEADS_PREFIX_READ,
             LiveOperation.DOLT_REMOTE_LIST,
             LiveOperation.DOLT_REMOTE_ADD,
+            LiveOperation.DOLT_COMMIT,
             LiveOperation.BEADS_SETUP,
             LiveOperation.BEADS_SETUP_CHECK,
             LiveOperation.BEADS_HOOKS_INSTALL,
@@ -1645,6 +1899,14 @@ def _build_invocation(
         if type(parameters) is not CentralDoltProbeRequest:
             raise LiveExecutorError("live operation received the wrong request type")
         argv, cwd = _dolt_argv(parameters)
+    elif operation is LiveOperation.DOLT_DATABASE_READBACK:
+        if type(parameters) is not DoltDatabaseReadbackRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _dolt_database_readback_argv(parameters)
+    elif operation is LiveOperation.DOLT_COMMIT:
+        if type(parameters) is not DoltCommitRequest:
+            raise LiveExecutorError("live operation received the wrong request type")
+        argv, cwd = _dolt_commit_argv(parameters)
     elif operation is LiveOperation.GIT_CLONE:
         if type(parameters) is not GitCloneRequest:
             raise LiveExecutorError("live operation received the wrong request type")
@@ -1780,21 +2042,49 @@ def _build_invocation(
         environment = dict(_FIXED_ENVIRONMENT)
         environment["HERMES_HOME"] = str(parameters.hermes_home)
         environment["XDG_STATE_HOME"] = str(parameters.state_home)
+        # dolt needs a writable config root (`$DOLT_ROOT_PATH/.dolt`). Under the
+        # detached fixed env (HOME=/var/empty) it otherwise fails
+        # `mkdir /var/empty/.dolt: operation not permitted`, which breaks every
+        # audit dolt query. Point it at the audit's own XDG state subdir
+        # (`<state_home>/hermes`, already writable and used for STATE_FILE) so
+        # dolt writes a fresh isolated config there — never /var/empty and never
+        # the operator's real ~/.dolt. HOME stays /var/empty (credential-detached).
+        environment["DOLT_ROOT_PATH"] = str(parameters.state_home / "hermes")
         for value in environment.values():
             if _SECRET_SHAPED.search(value) or "\x00" in value or "\n" in value or "\r" in value:
                 raise LiveExecutorError("coverage audit environment contains invalid material")
         env = MappingProxyType(environment)
         timeout = 30
     elif operation in _CREDENTIAL_CHAIN_OPERATIONS:
-        # The three authenticated git operations (visibility probe, clone, push)
-        # resolve the operator's credential.helper chain. Built exclusively from
-        # the minimal-env allowlist with no credential value; still re-checked by
+        # The authenticated git operations (visibility probe, clone, push,
+        # origin/main readback, Dolt push) resolve the operator's
+        # credential.helper chain. Built exclusively from the credential-chain
+        # key set plus the Phil-approved token passthrough; still re-checked by
         # the shared validator before spawn.
         env = _credential_chain_environment()
-        timeout = TIMEOUT_SECONDS
-    else:
+        # BD_DOLT_PUSH talks to the shared central Dolt server over the network
+        # and is measurably slow (~12.5s even as a no-op, longer on first push),
+        # so it gets the server-mutation budget rather than the short local cap.
+        timeout = (
+            SERVER_MUTATION_TIMEOUT_SECONDS
+            if operation is LiveOperation.BD_DOLT_PUSH
+            else TIMEOUT_SECONDS
+        )
+    elif operation in (
+        LiveOperation.GIT_REMOTE_PREFLIGHT,
+        LiveOperation.GIT_ORIGIN_ANONYMOUS_LS_REMOTE,
+    ):
+        # The two anonymous remote probes stay fully credential-detached on the
+        # fixed environment (HOME=/var/empty, GIT_ASKPASS=/usr/bin/false): they
+        # must never touch the operator's credential store or account HOME.
         env = _minimal_environment(_FIXED_ENVIRONMENT, program=argv[0])
         timeout = TIMEOUT_SECONDS
+    else:
+        env = _neutral_local_environment()
+        if operation in _SERVER_MUTATION_OPERATIONS:
+            timeout = SERVER_MUTATION_TIMEOUT_SECONDS
+        else:
+            timeout = TIMEOUT_SECONDS
 
     invocation = _TransportInvocation(
         operation=operation,

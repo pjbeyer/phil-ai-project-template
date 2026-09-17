@@ -36,6 +36,8 @@ from scripts.adapters import (
     RenderMutationRequest,
     TemplateRevisionReadRequest,
     ToolchainReadRequest,
+    _normalize_copier_src_path,
+    _is_vendored_scaffold,
     _register_controlled_transport,
 )
 from scripts.evidence import request_fingerprint
@@ -1573,6 +1575,52 @@ class ControlledG01G03Tests(unittest.TestCase):
         result = controller.run(request, configuration=config, home=home)
         self.assertEqual(result.state, "blocked-preflight")
         self.assert_persisted_safe(result, home, evidence_dir)
+
+
+class PublishSurfaceHelperTests(unittest.TestCase):
+    def test_normalize_copier_src_path_rewrites_only_src_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            (dest / ".copier-answers.yml").write_text(
+                "# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY\n"
+                "_commit: v0.1.4\n"
+                "_src_path: /Users/pjbeyer/Projects/pjbeyer/project-provisioning-template\n"
+                "project_description: ''\n"
+                "repository_name: tmp-proj-1\n",
+                encoding="utf-8",
+            )
+            _normalize_copier_src_path(dest, "pjbeyer/phil-ai-project-template")
+            out = (dest / ".copier-answers.yml").read_text(encoding="utf-8")
+            self.assertIn("_src_path: pjbeyer/phil-ai-project-template\n", out)
+            self.assertNotIn("/Users/", out)
+            self.assertIn("_commit: v0.1.4\n", out)
+            self.assertIn("repository_name: tmp-proj-1\n", out)
+
+    def test_normalize_copier_src_path_rejects_unsafe_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            (dest / ".copier-answers.yml").write_text("_src_path: /Users/x\n", encoding="utf-8")
+            for bad in ("/Users/pjbeyer/template", "pjbeyer; rm -rf", "pjbeyer/template/../../x"):
+                with self.subTest(bad=bad), self.assertRaises(AdapterError):
+                    _normalize_copier_src_path(dest, bad)
+            # Missing _src_path line -> raises.
+            (dest / ".copier-answers.yml").write_text("project_kind: generic\n", encoding="utf-8")
+            with self.assertRaises(AdapterError):
+                _normalize_copier_src_path(dest, "pjbeyer/phil-ai-project-template")
+
+    def test_is_vendored_scaffold_classifies_known_dirs(self) -> None:
+        self.assertTrue(_is_vendored_scaffold((".claude", "hooks", "pre-commit")))
+        self.assertTrue(_is_vendored_scaffold((".codex", "config.toml")))
+        self.assertTrue(_is_vendored_scaffold((".agents", "skills", "beads", "SKILL.md")))
+        self.assertTrue(_is_vendored_scaffold(
+            (".specify", "extensions", "agent-context", "scripts", "bash", "x.sh")
+        ))
+        # User-authored content is NOT excluded.
+        self.assertFalse(_is_vendored_scaffold(("README.md",)))
+        self.assertFalse(_is_vendored_scaffold(("src", "main.py")))
+        self.assertFalse(_is_vendored_scaffold((".specify", "memory", "constitution.md")))
+        self.assertFalse(_is_vendored_scaffold((".specify",)))
+        self.assertFalse(_is_vendored_scaffold(()))
 
 
 if __name__ == "__main__":

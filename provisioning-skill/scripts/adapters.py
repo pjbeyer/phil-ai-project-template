@@ -43,8 +43,11 @@ from .live_executor import (
     BeadsPrefixReadRequest,
     BeadsSetupRequest,
     CopierRenderRequest,
+    BeadsInitRequest as LiveBeadsInitRequest,
     CoverageAuditRequest,
     CentralDoltProbeRequest,
+    DoltDatabaseReadbackRequest,
+    DoltCommitRequest,
     DoltRemoteAddRequest,
     DoltRemoteListRequest,
     GitAddAllRequest,
@@ -1677,6 +1680,62 @@ def _parse_bd_issue_object(raw: str) -> dict[str, Any]:
     return dict(payload)
 
 
+def _normalize_copier_src_path(destination: Path, identity: str) -> None:
+    """Rewrite Copier's local ``_src_path`` to the approved source identity.
+
+    ``copier copy`` records the template checkout as an absolute workstation
+    path (``_src_path: /Users/...``), which FR-029 must never publish. The
+    approved identity (e.g. ``pjbeyer/phil-ai-project-template``) is the value
+    ``_validate_answers`` already requires; rewrite that single line in place so
+    the published answer metadata carries no private absolute path.
+    """
+    if (
+        not identity
+        or ".." in identity
+        or redact(identity) != identity
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", identity) is None
+    ):
+        raise AdapterError("Copier source identity is not a safe fixed value")
+    path = destination / ".copier-answers.yml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise AdapterError("Copier answers normalization readback failed") from error
+    lines = text.splitlines()
+    rewritten = False
+    for index, line in enumerate(lines):
+        if line.strip().startswith("_src_path:"):
+            lines[index] = f"_src_path: {identity}"
+            rewritten = True
+            break
+    if not rewritten:
+        raise AdapterError("Copier answers carried no _src_path to normalize")
+    try:
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as error:
+        raise AdapterError("Copier answers normalization rewrite failed") from error
+
+
+def _is_vendored_scaffold(parts: tuple[str, ...]) -> bool:
+    """True when a rendered path is tool-installed verbatim, not user-authored.
+
+    ``specify extension add``, the Claude/Codex setup gates, and ``bd setup``
+    vendor third-party tooling into these directories; their contents are
+    illustrative/generated, not user content, and their comments carry generic
+    path examples (``/var/…``, ``C:/...``) that trip the FR-029 absolute-path
+    scanner without representing any real workstation leak. These are excluded
+    from the rendered-surface scan; every user-authored file (including
+    ``.specify/memory/constitution.md``) remains scanned.
+    """
+    if not parts:
+        return False
+    if parts[0] in {".claude", ".codex", ".agents"}:
+        return True
+    if parts[0] == ".specify" and len(parts) > 1 and parts[1] == "extensions":
+        return True
+    return False
+
+
 def _parse_git_porcelain_branch(raw: str) -> dict[str, Any]:
     """Parse ``git status --porcelain=v1 --branch`` into branch/head/clean fields.
 
@@ -1688,7 +1747,16 @@ def _parse_git_porcelain_branch(raw: str) -> dict[str, Any]:
     if not lines or not lines[0].startswith("## "):
         raise AdapterError("git porcelain status omitted the branch header")
     header = lines[0][3:].strip()
-    branch = header.split("...", 1)[0].strip()
+    # An empty origin has no commits; git reports an unborn branch as
+    # ``## No commits yet on main`` (optionally with a ``...origin/main [gone]``
+    # tracking suffix). Recognize it so a fresh empty clone is admitted as on
+    # ``main`` with zero change entries, rather than rejected as an unsafe
+    # branch token (the spaces in "No commits yet on main" would otherwise trip
+    # the whitespace guard below).
+    if header.startswith("No commits yet on "):
+        branch = header[len("No commits yet on "):].split("...", 1)[0].strip()
+    else:
+        branch = header.split("...", 1)[0].strip()
     if not branch or any(character.isspace() for character in branch):
         raise AdapterError("git porcelain status branch is unsafe")
     entries = [line for line in lines[1:] if line.strip()]
@@ -1730,6 +1798,21 @@ def _parse_git_ls_remote_main(raw: str) -> str:
     return sha
 
 
+def _assert_git_ls_remote_main_absent(raw: str) -> None:
+    """Require ``refs/heads/main`` to be absent on the origin before first push.
+
+    ``git ls-remote origin refs/heads/main`` emits zero lines against an empty
+    origin. The pre-push boundary (FR-007/FR-019) re-validates that the origin
+    G01 established as empty has not since gained a competing ``main``: any
+    matching ref line means a changed or ambiguous remote and stops the run
+    before any push. Post-push readback uses ``_parse_git_ls_remote_main``
+    (exactly one line) instead.
+    """
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if lines:
+        raise AdapterError("ls-remote main pre-push readback reported an unexpected remote ref")
+
+
 def _parse_central_dolt_probe(raw: str) -> None:
     """Parse ``dolt ... sql -r json -q "SELECT 1 AS ok;"`` into the exact row.
 
@@ -1744,6 +1827,46 @@ def _parse_central_dolt_probe(raw: str) -> None:
         raise AdapterError("central Dolt probe output was not a JSON object")
     if payload.get("rows") != [{"ok": "1"}]:
         raise AdapterError("central Dolt probe did not return the exact SELECT 1 row")
+
+
+def _parse_dolt_database_readback(raw: str) -> set[str]:
+    """Parse ``SHOW TABLES FROM <db>`` into the set of table names observed.
+
+    The live server answers ``{"rows": [{"Tables_in_<db>": "issues"}, ...]}``.
+    We require at least the authoritative Beads core tables to be present so the
+    readback is an independent proof of the generated database's real schema,
+    not merely that the name exists.
+    """
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("dolt database readback output was not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise AdapterError("dolt database readback output was not a JSON object")
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise AdapterError("dolt database readback output had no rows array")
+    tables: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise AdapterError("dolt database readback row was not an object")
+        values = {value for value in row.values() if isinstance(value, str)}
+        tables.update(values)
+    required = {
+        "issues",
+        "interactions",
+        "events",
+        "metadata",
+        "config",
+        "schema_migrations",
+    }
+    if not required.issubset(tables):
+        missing = sorted(required - tables)
+        raise AdapterError(
+            "dolt database readback did not observe the authoritative Beads "
+            f"schema (missing: {', '.join(missing)})"
+        )
+    return tables
 
 
 def _parse_git_ls_remote_empty(raw: str) -> None:
@@ -2053,6 +2176,10 @@ class LiveAdapter:
         if rendered.returncode != 0:
             detail = _SECRET.sub("[REDACTED]", rendered.stderr or rendered.stdout or "no diagnostic")
             raise AdapterError(f"g03.render failed with exit {rendered.returncode}: {detail[:500]}")
+        # Copier records the template checkout as an absolute local path; rewrite
+        # it to the approved source identity so the rendered answer metadata (and
+        # therefore the FR-029 published surface) never carries a workstation path.
+        _normalize_copier_src_path(destination, config.template_source_identity)
         # Render readback: the rendered checkout must exist and the immutable
         # revision must be recorded (FR-008/FR-009). The full matrix readback is
         # performed by the render validator in the closeout gate (G10).
@@ -2070,7 +2197,7 @@ class LiveAdapter:
         executor = self._production_executor()
         init = executor.execute(
             LiveOperation.BEADS_INIT,
-            BeadsInitRequest(destination, request.beads_prefix),
+            LiveBeadsInitRequest(destination, request.beads_prefix),
         )
         if init.returncode != 0:
             detail = _SECRET.sub("[REDACTED]", init.stderr or init.stdout or "no diagnostic")
@@ -2089,7 +2216,58 @@ class LiveAdapter:
         prefix_value = _parse_beads_prefix_raw(prefix.stdout)
         if prefix_value != request.beads_prefix:
             raise AdapterError("Beads issue prefix readback does not match the requested prefix")
+        # Independent server-side readback: re-list the generated database's
+        # tables on the central server and require the authoritative Beads
+        # schema.  This proves the init produced a real database (independently
+        # of the .beads/metadata.json the tool wrote), which also resolves the
+        # benign case where prefix-based naming makes dolt_database == prefix.
+        database_readback = executor.execute(
+            LiveOperation.DOLT_DATABASE_READBACK,
+            DoltDatabaseReadbackRequest(metadata["dolt_database"]),
+        )
+        if database_readback.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", database_readback.stderr or database_readback.stdout or "no diagnostic")
+            raise AdapterError(f"g04.database.read failed with exit {database_readback.returncode}: {detail[:500]}")
+        _parse_dolt_database_readback(database_readback.stdout)
         self._metadata = metadata
+        # `bd init` seeds the `config` table (issue prefix, compaction knobs);
+        # the G07 coverage audit requires a clean working set (the established
+        # managed-repo convention), so the tracker must start committed.
+        # Historically `bd init` left that write uncommitted and raw
+        # `dolt commit -A` (DOLT_COMMIT; `bd dolt commit` is a silent no-op in
+        # external-server mode) committed it here. Newer bd (post v1.3.0 schema
+        # migrations, observed 2026-09-16) commits the seed itself, leaving
+        # nothing to commit. The gate's contract is "the tracker starts
+        # committed": attempt the commit, and when the server reports nothing
+        # to commit, prove the working set is actually clean rather than
+        # failing closed on the benign case.
+        commit = executor.execute(
+            LiveOperation.DOLT_COMMIT,
+            DoltCommitRequest(
+                metadata["dolt_database"],
+                "chore: initialize Beads tracker state",
+            ),
+        )
+        if commit.returncode != 0:
+            if "nothing to commit" in (commit.stderr or "") or "nothing to commit" in (
+                commit.stdout or ""
+            ):
+                status = executor.execute(
+                    LiveOperation.DOLT_DATABASE_READBACK,
+                    DoltDatabaseReadbackRequest(metadata["dolt_database"]),
+                )
+                if status.returncode != 0:
+                    raise AdapterError("g04.dolt.status failed after a nothing-to-commit result")
+                # A clean working set means bd init already committed the seed:
+                # the gate's contract is satisfied without a new commit.
+                _parse_dolt_database_readback(status.stdout)
+            else:
+                detail = _SECRET.sub(
+                    "[REDACTED]", commit.stderr or commit.stdout or "no diagnostic"
+                )
+                raise AdapterError(
+                    f"g04.dolt.commit failed with exit {commit.returncode}: {detail[:500]}"
+                )
         self._evidence[Gate.BEADS] = (
             f"server metadata read from .beads/metadata.json at 127.0.0.1:3307; "
             f"exact prefix and database {metadata['dolt_database']} read back"
@@ -2097,7 +2275,7 @@ class LiveAdapter:
 
     def _expected_dolt_remote(self) -> str:
         _, origin, _, _ = self._context()
-        return f"git+https://github.com/{origin.identity}.git"
+        return f"git+https://github.com/{origin.identity}"
 
     def _g05(self) -> None:
         _, _, destination, _ = self._context()
@@ -2111,17 +2289,26 @@ class LiveAdapter:
         if before.returncode != 0:
             detail = _SECRET.sub("[REDACTED]", before.stderr or before.stdout or "no diagnostic")
             raise AdapterError(f"g05.remote.before failed with exit {before.returncode}: {detail[:500]}")
-        # The before-state must show no remotes (exact empty list).
+        # bd init --server --external auto-creates the Dolt `origin` remote from
+        # the git checkout's origin (no --skip-remote exists in bd 1.2.2), so a
+        # fresh init already carries `origin -> git+https://github.com/<repo>`.
+        # The before-state must therefore be EITHER empty (defensive/legacy
+        # path) OR exactly the auto-created origin; any other remote state fails
+        # closed. When the correct remote already exists, the add is redundant
+        # and is skipped.
         before_remotes = _parse_dolt_remotes_raw(before.stdout)
-        if before_remotes != []:
-            raise AdapterError("g05.remote.before must show no existing Dolt remotes")
-        add = executor.execute(
-            LiveOperation.DOLT_REMOTE_ADD,
-            DoltRemoteAddRequest(destination, expected_remote),
-        )
-        if add.returncode != 0:
-            detail = _SECRET.sub("[REDACTED]", add.stderr or add.stdout or "no diagnostic")
-            raise AdapterError(f"g05.remote.add failed with exit {add.returncode}: {detail[:500]}")
+        if before_remotes == []:
+            add = executor.execute(
+                LiveOperation.DOLT_REMOTE_ADD,
+                DoltRemoteAddRequest(destination, expected_remote),
+            )
+            if add.returncode != 0:
+                detail = _SECRET.sub("[REDACTED]", add.stderr or add.stdout or "no diagnostic")
+                raise AdapterError(f"g05.remote.add failed with exit {add.returncode}: {detail[:500]}")
+        elif before_remotes == [{"name": "origin", "url": expected_remote}]:
+            pass
+        else:
+            raise AdapterError("g05.remote.before showed an unexpected existing Dolt remote")
         after = executor.execute(
             LiveOperation.DOLT_REMOTE_LIST,
             DoltRemoteListRequest(destination),
@@ -2351,8 +2538,16 @@ class LiveAdapter:
             assert_safe_backup_root(destination, backup_root)
         except BackupError as exc:
             raise AdapterError(str(exc)) from exc
-        if self._entry_exists(backup_root) or self._entry_exists(sidecar):
-            raise AdapterError("existing backup root or sidecar forbids backup initialization")
+        # bd init --server --external auto-scaffolds `.beads/backup/` (with a
+        # `backup_state.json`, `manifest`, and darc archive) but leaves it
+        # UNconfigured: `bd backup status --json` reports `dolt.configured:
+        # false` and no `dolt-backup.json` sidecar exists. The authoritative
+        # "already configured" marker is the sidecar (written only by `bd
+        # backup init`), not the directory. Reject only a pre-existing sidecar;
+        # the auto-scaffolded directory is the expected pre-init state that
+        # `bd backup init <path>` consumes idempotently.
+        if self._entry_exists(sidecar):
+            raise AdapterError("existing backup sidecar forbids backup initialization")
         # Recheck immediately before the first mutation; later mutation boundaries
         # repeat the same lexical no-symlink containment assertion.
         try:
@@ -2650,6 +2845,9 @@ class LiveAdapter:
                 continue
             if ".git" in path.parts or ".beads" in path.parts:
                 continue
+            relative_parts = path.relative_to(destination).parts
+            if _is_vendored_scaffold(relative_parts):
+                continue
             try:
                 rendered_texts.append((str(path.relative_to(destination)), path.read_text(encoding="utf-8")))
             except (OSError, UnicodeDecodeError):
@@ -2719,7 +2917,7 @@ class LiveAdapter:
         if remote.returncode != 0:
             detail = _SECRET.sub("[REDACTED]", remote.stderr or remote.stdout or "no diagnostic")
             raise AdapterError(f"g11.ls-remote failed with exit {remote.returncode}: {detail[:500]}")
-        _parse_git_ls_remote_main(remote.stdout)
+        _assert_git_ls_remote_main_absent(remote.stdout)
         # Push main to the exact approved origin upstream (credential-scoped).
         pushed = executor.execute(
             LiveOperation.GIT_PUSH,
@@ -2739,7 +2937,24 @@ class LiveAdapter:
         remote_sha = _parse_git_ls_remote_main(verify.stdout)
         if remote_sha != self._git_head:
             raise AdapterError("g11 Git HEAD does not equal the upstream main SHA")
-        self._evidence[Gate.PUSH] = "Git main pushed and exact HEAD == upstream read back"
+        # Dolt remote sync (FR-019 / expected_sync manual-dolt-remote): push the
+        # tracker's Dolt data ref to the `git+https` origin, then require the
+        # exact `Push complete.` evidence. Mirrors the controlled G11 contract
+        # (git push AND dolt push independently read back).
+        _, origin, _, _ = self._context()
+        dolt_pushed = executor.execute(
+            LiveOperation.BD_DOLT_PUSH,
+            BdDoltPushRequest(destination),
+        )
+        if dolt_pushed.returncode != 0:
+            detail = _SECRET.sub("[REDACTED]", dolt_pushed.stderr or dolt_pushed.stdout or "no diagnostic")
+            raise AdapterError(f"g11.dolt.push failed with exit {dolt_pushed.returncode}: {detail[:500]}")
+        if "Push complete." not in dolt_pushed.stdout:
+            raise AdapterError("g11 Dolt push output did not contain exact 'Push complete.' evidence")
+        self._evidence[Gate.PUSH] = (
+            "Git main pushed and exact HEAD == upstream read back; "
+            "Dolt remote 'origin' push completed and read back"
+        )
 
     def push_git(self) -> None:
         self._require_available()
@@ -2765,7 +2980,7 @@ class LiveAdapter:
 
     def push_dolt(self) -> None:
         self._require_available()
-        _, _, destination, _ = self._context()
+        _, origin, destination, _ = self._context()
         executor = self._production_executor()
         result = executor.execute(
             LiveOperation.BD_DOLT_PUSH,
@@ -2793,11 +3008,10 @@ class LiveAdapter:
             if metadata.get(key) != expected:
                 raise AdapterError(f"Beads metadata {key} does not match the approved central service")
         database = metadata.get("dolt_database")
-        if not isinstance(database, str) or not database or database == request.beads_prefix:
-            # Equal names are legal in Beads generally, but the provisioner must prove it
-            # read a generated value rather than substituting the prefix.  The controlled
-            # adapter therefore requires an independently named database readback.
-            raise AdapterError("Beads metadata omitted an independently read actual dolt_database")
+        if not isinstance(database, str) or not database:
+            raise AdapterError("Beads metadata omitted an actual dolt_database")
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,127}", database) is None:
+            raise AdapterError("Beads metadata dolt_database identity was invalid")
         self._metadata = dict(metadata)
         return dict(metadata)
 

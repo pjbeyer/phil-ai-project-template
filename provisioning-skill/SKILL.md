@@ -95,6 +95,7 @@ The intended state machine is G01–G11:
 - A complete inspected state returns `verified-existing` without mutation.
 - Git and Dolt synchronization are distinct evidence fields. Neither one alone proves completion.
 - Never start/stop/restart/reconfigure the shared Dolt listener. Use the existing server at `127.0.0.1:3307` only.
+- Test-rig clean-slate caveat: dropping and recreating a Dolt database with the same name leaves the running server's in-memory remote state stale — `bd dolt push` then fast-fails (`Error 1105 ... not a git repository: '...git-remote-cache/<hash>/repo.git'` in ~3s, no clone attempted). Restarting the Dolt LaunchAgent (`launchctl kickstart -k gui/$UID/com.pjbeyer.dolt-server`) flushes it; that restart is Phil's call, not the skill's.
 - Clear `BEADS_DOLT_PORT` and `BEADS_DOLT_DATABASE` only in a future approved executor's minimal Beads-command environment; no such executor is currently implemented.
 
 ## Required live-state contracts

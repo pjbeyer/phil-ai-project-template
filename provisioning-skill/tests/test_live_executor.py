@@ -113,15 +113,26 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         import pwd
 
         real_home = pwd.getpwuid(os.getuid()).pw_dir
+        # Clear the three token keys so the test is hermetic against the
+        # operator's ambient account tokens; PATCH the passwd resolver's input
+        # separately below.
+        token_clear = {key: None for key in live_executor._CREDENTIAL_CHAIN_TOKEN_KEYS if key in os.environ}
         with patch.dict("os.environ", {"HOME": "/tmp/attacker-chosen-home"}, clear=False):
-            env = dict(_credential_chain_environment())
+            with patch.dict("os.environ", {}, clear=False):
+                for key in token_clear:
+                    os.environ.pop(key, None)
+                env = dict(_credential_chain_environment())
         # The regime ignores the taintable os.environ HOME and reads the
         # authoritative passwd record for the invoking uid.
         self.assertEqual(env["HOME"], real_home)
         self.assertNotEqual(env["HOME"], "/tmp/attacker-chosen-home")
-        # The credential-chain key set is closed: no config/discovery/askpass
-        # override can ride along to inject a credential.helper.
-        self.assertEqual(set(env), live_executor._CREDENTIAL_CHAIN_ENV_KEYS)
+        # The credential-chain key set is closed over the base keys plus the
+        # fixed token passthrough set: no config/discovery/askpass override can
+        # ride along to inject a credential.helper.
+        self.assertEqual(
+            set(env) - live_executor._CREDENTIAL_CHAIN_TOKEN_KEYS,
+            live_executor._CREDENTIAL_CHAIN_ENV_KEYS,
+        )
         for disallowed in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_ASKPASS", "XDG_CONFIG_HOME"):
             self.assertNotIn(disallowed, env)
 
@@ -496,7 +507,7 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 request = transport.calls[0]
                 self.assertFalse(request.shell)  # type: ignore[attr-defined]
                 self.assertGreater(request.timeout_seconds, 0)  # type: ignore[attr-defined]
-                self.assertLessEqual(request.timeout_seconds, 30)  # type: ignore[attr-defined]
+                self.assertLessEqual(request.timeout_seconds, live_executor.SERVER_MUTATION_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
                 lowered = {argument.lower() for argument in request.argv}  # type: ignore[attr-defined]
                 self.assertTrue(
                     lowered.isdisjoint(
@@ -829,6 +840,8 @@ class ControlledLiveExecutorTests(unittest.TestCase):
                 LiveOperation.GIT_REMOTE_PREFLIGHT,
                 LiveOperation.LOCAL_GIT_READBACK,
                 LiveOperation.CENTRAL_DOLT_PROBE,
+                LiveOperation.DOLT_DATABASE_READBACK,
+                LiveOperation.DOLT_COMMIT,
                 LiveOperation.GIT_CLONE,
                 LiveOperation.GIT_REMOTE_READBACK,
                 LiveOperation.GIT_TEMPLATE_REVISION,
@@ -1260,6 +1273,21 @@ class ControlledLiveExecutorTests(unittest.TestCase):
         # The readback op is unchanged and must still pass.
         _build_invocation(LiveOperation.GIT_LS_REMOTE_MAIN, GitLsRemoteMainRequest(dest), home)
 
+    def test_bd_dolt_push_gets_server_mutation_budget(self) -> None:
+        """BD_DOLT_PUSH is a slow network push (~12.5s no-op) and must not be
+        capped at the short local-probe TIMEOUT_SECONDS."""
+        from scripts.live_executor import (
+            BdDoltPushRequest,
+            SERVER_MUTATION_TIMEOUT_SECONDS,
+            _build_invocation,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        invocation = _build_invocation(
+            LiveOperation.BD_DOLT_PUSH, BdDoltPushRequest(dest), self.home
+        )
+        self.assertEqual(invocation.timeout_seconds, SERVER_MUTATION_TIMEOUT_SECONDS)
+
     def test_forged_push_shapes_are_rejected(self) -> None:
         """A hand-built `_TransportInvocation` labeled GIT_PUSH/BD_DOLT_PUSH with a
         deviant argv must be rejected by the exact-shape pin (review finding)."""
@@ -1506,6 +1534,7 @@ class BeadsReadbackParserTests(unittest.TestCase):
         self.assertEqual(invocation.cwd, scripts_dir)
         self.assertEqual(invocation.env["HERMES_HOME"], str(hermes_home))
         self.assertEqual(invocation.env["XDG_STATE_HOME"], str(state_home))
+        self.assertEqual(invocation.env["DOLT_ROOT_PATH"], str(state_home / "hermes"))
         self.assertNotIn("BEADS_DOLT_PORT", invocation.env)
 
     def test_coverage_audit_rejects_unsafe_or_relative_paths(self) -> None:
@@ -1558,7 +1587,7 @@ class BeadsReadbackParserTests(unittest.TestCase):
         argv, cwd = live_executor._speckit_init_argv(SpeckitInitRequest(dest))
         self.assertEqual(
             argv,
-            ("specify", "init", "--here", "--integration", "hermes", "--script", "sh", "--non-interactive"),
+            ("specify", "init", "--here", "--force", "--integration", "hermes", "--script", "sh", "--non-interactive"),
         )
         self.assertEqual(cwd, dest)
 
@@ -1576,6 +1605,52 @@ class BeadsReadbackParserTests(unittest.TestCase):
         for name in ("verify-tasks", "security-review", "command-density", "jira", "verify", "review"):
             with self.subTest(name=name), self.assertRaises(LiveExecutorError):
                 live_executor._speckit_extension_add_argv(SpeckitExtensionAddRequest(dest, name))
+
+    def test_speckit_init_force_exemption_is_narrow(self) -> None:
+        from scripts.live_executor import (
+            LiveOperation,
+            SpeckitInitRequest,
+            _TransportInvocation,
+            _validate_built_invocation,
+        )
+
+        dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
+        # The exact module-constructed SPECKIT_INIT argv (with --force) validates.
+        argv, cwd = live_executor._speckit_init_argv(SpeckitInitRequest(dest))
+        invocation = _TransportInvocation(
+            operation=LiveOperation.SPECKIT_INIT,
+            argv=argv,
+            cwd=cwd,
+            env=live_executor._neutral_local_environment(),
+            shell=False,
+            timeout_seconds=60,
+        )
+        _validate_built_invocation(invocation)  # must not raise
+
+        # Attached `--force=…` / `-f…` forms stay hard-blocked even on SPECKIT_INIT.
+        for bad_token in ("--force=x", "-f"):
+            bad = _TransportInvocation(
+                operation=LiveOperation.SPECKIT_INIT,
+                argv=("specify", "init", "--here", bad_token, "--non-interactive"),
+                cwd=cwd,
+                env=live_executor._neutral_local_environment(),
+                shell=False,
+                timeout_seconds=60,
+            )
+            with self.subTest(bad_token=bad_token), self.assertRaises(LiveExecutorError):
+                _validate_built_invocation(bad)
+
+        # `--force` is NOT admitted on any other operation.
+        other = _TransportInvocation(
+            operation=LiveOperation.GIT_CLONE,
+            argv=("git", "clone", "--force", "x", "y"),
+            cwd=cwd,
+            env=live_executor._neutral_local_environment(),
+            shell=False,
+            timeout_seconds=60,
+        )
+        with self.assertRaises(LiveExecutorError):
+            _validate_built_invocation(other)
 
     def test_speckit_integration_read_builds_exact_argv(self) -> None:
         from scripts.live_executor import SpeckitIntegrationReadRequest
@@ -1703,7 +1778,7 @@ class BeadsReadbackParserTests(unittest.TestCase):
         dest = Path("/tmp/synthetic-home/Projects/pjbeyer/demo")
         cases = (
             (live_executor._git_status_all_argv(GitStatusAllRequest(dest)),
-             ("git", "--no-optional-locks", "-C", str(dest), "status", "--porcelain=v1", "--untracked-files=all")),
+             ("git", "--no-optional-locks", "-C", str(dest), "status", "--porcelain=v1", "--branch", "--untracked-files=all")),
             (live_executor._git_add_all_argv(GitAddAllRequest(dest)),
              ("git", "--no-optional-locks", "-C", str(dest), "add", "--all")),
             (live_executor._git_diff_cached_names_argv(GitDiffCachedNamesRequest(dest)),
@@ -1711,7 +1786,10 @@ class BeadsReadbackParserTests(unittest.TestCase):
             (live_executor._git_diff_cached_text_argv(GitDiffCachedTextRequest(dest)),
              ("git", "--no-optional-locks", "-C", str(dest), "diff", "--cached")),
             (live_executor._git_commit_argv(GitCommitRequest(dest, "chore: x")),
-             ("git", "--no-optional-locks", "-C", str(dest), "commit", "-m", "chore: x")),
+             ("git", "--no-optional-locks", "-C", str(dest),
+              "-c", "user.name=Phil Beyer",
+              "-c", "user.email=6152278+pjbeyer@users.noreply.github.com",
+              "commit", "-m", "chore: x")),
             (live_executor._git_rev_parse_head_argv(GitRevParseHeadRequest(dest)),
              ("git", "--no-optional-locks", "-C", str(dest), "rev-parse", "HEAD")),
             (live_executor._git_status_branch_argv(GitStatusBranchRequest(dest)),
@@ -1751,6 +1829,18 @@ class BeadsReadbackParserTests(unittest.TestCase):
         with self.assertRaises(AdapterError):
             _parse_git_porcelain_branch("no header here\n M x\n")
 
+    def test_parse_git_porcelain_branch_unborn_empty_origin(self) -> None:
+        from scripts.adapters import _parse_git_porcelain_branch
+
+        # An empty origin has no commits; git reports the unborn branch header
+        # with the tracking suffix appended after the first commit lands upstream.
+        unborn = "## No commits yet on main...origin/main [gone]\n"
+        parsed = _parse_git_porcelain_branch(unborn)
+        self.assertEqual(parsed["branch"], "main")
+        self.assertTrue(parsed["clean"])
+        unborn_no_suffix = "## No commits yet on main\n"
+        self.assertEqual(_parse_git_porcelain_branch(unborn_no_suffix)["branch"], "main")
+
     def test_parse_git_staged_paths_and_rev_parse_head(self) -> None:
         from scripts.adapters import AdapterError, _parse_git_rev_parse_head, _parse_git_staged_paths
 
@@ -1761,6 +1851,21 @@ class BeadsReadbackParserTests(unittest.TestCase):
         for bad in ("", "short", "a" * 39, "g" * 40):
             with self.subTest(raw=bad), self.assertRaises(AdapterError):
                 _parse_git_rev_parse_head(bad)
+
+    def test_assert_git_ls_remote_main_absent(self) -> None:
+        from scripts.adapters import AdapterError, _assert_git_ls_remote_main_absent
+
+        # Empty origin -> zero lines -> passes.
+        _assert_git_ls_remote_main_absent("")
+        _assert_git_ls_remote_main_absent("\n\n")
+        # Any ref line (competing main, other branch, malformed) -> fails closed.
+        for bad in (
+            "a" * 40 + "\trefs/heads/main\n",
+            "a" * 40 + "\trefs/heads/other\n",
+            "garbage\n",
+        ):
+            with self.subTest(raw=bad), self.assertRaises(AdapterError):
+                _assert_git_ls_remote_main_absent(bad)
 
     def test_parse_git_ls_remote_main(self) -> None:
         from scripts.adapters import AdapterError, _parse_git_ls_remote_main
@@ -1792,6 +1897,84 @@ class BeadsReadbackParserTests(unittest.TestCase):
         ):
             with self.subTest(raw=bad), self.assertRaises(AdapterError):
                 _parse_central_dolt_probe(bad)
+
+    def test_parse_dolt_database_readback(self) -> None:
+        from scripts.adapters import AdapterError, _parse_dolt_database_readback
+
+        good = '{"rows": [{"Tables_in_tmp1": "issues"}, {"Tables_in_tmp1": "interactions"}, '
+        good += '{"Tables_in_tmp1": "events"}, {"Tables_in_tmp1": "metadata"}, '
+        good += '{"Tables_in_tmp1": "config"}, {"Tables_in_tmp1": "schema_migrations"}]}'
+        tables = _parse_dolt_database_readback(good)
+        self.assertEqual(
+            tables,
+            {"issues", "interactions", "events", "metadata", "config", "schema_migrations"},
+        )
+        # Missing any authoritative table is an independence failure.
+        missing_schema = '{"rows": [{"Tables_in_tmp1": "issues"}]}'
+        for bad in (
+            "",
+            "not json",
+            "[]",
+            '{"rows": []}',
+            missing_schema,
+            '{"rows": "not-a-list"}',
+            '{"rows": [{"Tables_in_tmp1": 1}]}',
+        ):
+            with self.subTest(raw=bad), self.assertRaises(AdapterError):
+                _parse_dolt_database_readback(bad)
+
+    def test_dolt_commit_builds_exact_argv(self) -> None:
+        from scripts.live_executor import (
+            DoltCommitRequest,
+            _dolt_commit_argv,
+            _DOLT_COMMIT_AUTHOR,
+        )
+
+        argv, cwd = _dolt_commit_argv(
+            DoltCommitRequest("tmp1", "chore: initialize Beads tracker state")
+        )
+        self.assertEqual(
+            argv,
+            (
+                "dolt", "--host", "127.0.0.1", "--port", "3307", "--no-tls",
+                "--use-db", "tmp1", "commit", "-A", "-m",
+                "chore: initialize Beads tracker state", "--author",
+                _DOLT_COMMIT_AUTHOR,
+            ),
+        )
+        self.assertIsNone(cwd)
+
+    def test_dolt_commit_rejects_unsafe_database_or_message(self) -> None:
+        from scripts.live_executor import (
+            DoltCommitRequest,
+            LiveExecutorError,
+            _dolt_commit_argv,
+        )
+
+        for database in ("tmp1; DROP TABLE x", "tmp-1", "1tmp", "", "a" * 129):
+            with self.subTest(database=database), self.assertRaises(LiveExecutorError):
+                _dolt_commit_argv(DoltCommitRequest(database, "chore: init"))
+        for message in ("msg; exit 1", "msg & rm", "msg `evil`", "msg$VAR", "op://v/1"):
+            with self.subTest(message=message), self.assertRaises(LiveExecutorError):
+                _dolt_commit_argv(DoltCommitRequest("tmp1", message))
+
+    def test_dolt_commit_author_exemption_accepts_only_exact_fixed_literal(self) -> None:
+        from scripts.live_executor import (
+            DoltCommitRequest,
+            _DOLT_COMMIT_AUTHOR,
+            _build_invocation,
+            LiveOperation,
+        )
+
+        # The fixed author carries angle brackets (shell metacharacters); the
+        # shared validator exempts ONLY the exact module constant.
+        invocation = _build_invocation(
+            LiveOperation.DOLT_COMMIT,
+            DoltCommitRequest("tmp1", "chore: initialize Beads tracker state"),
+            Path("/tmp/synthetic-home"),
+        )
+        self.assertIn(_DOLT_COMMIT_AUTHOR, invocation.argv)
+        self.assertEqual(invocation.env["HOME"], live_executor._neutral_local_environment()["HOME"])
 
     def test_parse_git_ls_remote_empty(self) -> None:
         from scripts.adapters import AdapterError, _parse_git_ls_remote_empty
@@ -1825,5 +2008,3 @@ class BeadsReadbackParserTests(unittest.TestCase):
         scan_staged_content("+print('hello world')\n")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
