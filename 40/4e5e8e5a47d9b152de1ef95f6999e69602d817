@@ -1,0 +1,24 @@
+provisioning-skill/SKILL.md
+  h_c5be3b3dad7ca8 98
+provisioning-skill/scripts/adapters.py
+  h_c5be3b3dad7ca8 46,49-50,1683-1738,1750-1759,1801-1815,1832-1871,2179-2182,2200,2219-2231,2233-2270,2278,2292-2298,2300-2311,2541-2550,2848-2850,2920,2940-2957,2983,3011-3014
+provisioning-skill/scripts/live_executor.py
+  h_c5be3b3dad7ca8 45-46,214-244,542-548,550-572,590,620-624,643-657,707-715,724-730,737,753-791,1090-1094,1238,1334,1364-1365,1423-1495,1523,1537-1545,1563,1575-1580,1584-1586,1593-1596,1599-1607,1614-1619,1650-1651,1768,1902-1909,2045-2052,2059-2062,2065-2079,2082-2087
+provisioning-skill/scripts/supervised_live_run.py
+  h_c5be3b3dad7ca8 1-133
+provisioning-skill/tests/test_live_executor.py
+  h_c5be3b3dad7ca8 116-119,121-124,129-135,510,843-844,1276-1290,1537,1590,1609-1654,1781,1789-1792,1832-1843,1855-1869,1901-1978
+provisioning-skill/tests/test_live_gates.py
+  h_c5be3b3dad7ca8 39-40,1580-1625
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.7.6",
+  "base_commit_sha": "404e5e8e5a47d9b152de1ef95f6999e69602d817",
+  "prompts": {},
+  "humans": {
+    "h_c5be3b3dad7ca8": {
+      "author": "Phil Beyer <6152278+pjbeyer@users.noreply.github.com>"
+    }
+  }
+}
