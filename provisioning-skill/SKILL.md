@@ -9,6 +9,21 @@ platforms: [macos]
 
 ## Current availability: simulation CLI + supervised live path
 
+**Graduating-gate decision (T051, 2026-09-17):** the first full live validation
+(T049) completed with **all gates G01–G11 passed** (supervised run
+`proc_dfefc0d59f37` against origin `pjbeyer/tmp-proj-1`, HEAD `5bcfd637…`,
+origin refs `main` + `refs/dolt/data` + `__dolt_remote_info__` read back
+independently). Post-enrollment controls (T050) reported no tmp-proj-1
+violations: maintenance dry-run exit 0 with the new repo discovered;
+integrity review zero tmp findings with fresh `last_sync` (no
+backup-never-synced); health review shows the new instance (secondary tier)
+with informational-only bootstrap-issue notes. Sanitized evidence:
+`evidence/t050-*.txt`, `evidence/t050-summary.md`. The provisioning workflow
+is **validated end-to-end**; remaining live-run hazards and lessons are
+recorded in the safety rules below (Dolt-server stale-remote-state restart,
+transient origin-visibility failures fail closed cleanly and are retryable
+after reset).
+
 The public CLI remains deterministic `FakeAdapter` simulation only: it has no
 live selector, never constructs `LiveAdapter`, always identifies its result as
 simulation, and exits nonzero.
